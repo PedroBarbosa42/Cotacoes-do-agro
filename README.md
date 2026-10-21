@@ -10,6 +10,8 @@ A aplicação é dividida em microsserviços independentes, cada um em seu próp
 
 **Ambiente publicado:** https://pedro-ferreira-isw055.lapps.studio
 
+## **Este projeto continua em:** https://github.com/PedroBarbosa42/Cotacoes-do-agro
+
 ## 📚 Documentação reversa
 
 A especificação do sistema, o diagrama de arquitetura, as regras de negócio extraídas do código, o modelo de dados e as dívidas técnicas estão em **[Documentação.md](./Documentação.md)**.
