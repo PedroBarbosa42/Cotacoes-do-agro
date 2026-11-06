@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}CatálogoFilmes{% endblock %}</title>
+    <title>{% block title %}CotaAgro{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="auth-page">
-    <a class="navbar-brand auth-brand" href="{{ url_for('login') }}">CATÁLOGO<span>FILMES</span></a>
+    <a class="navbar-brand auth-brand" href="{{ url_for('login') }}">COTA<span>AGRO</span></a>
 
     <main class="auth-card">
         {% with messages = get_flashed_messages() %}

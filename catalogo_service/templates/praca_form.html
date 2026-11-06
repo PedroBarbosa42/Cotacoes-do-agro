@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Nova praça | CotaAgro{% endblock %}
+
+{% block content %}
+<div class="admin-shell">
+    <p class="section-kicker">Operador</p>
+    <h1 class="section-title-lg">Cadastrar praça</h1>
+    <p class="auth-subtitle">A praça é a cooperativa ou cerealista em nome da qual você publica as cotações.</p>
+
+    <form class="form-shell" method="POST" action="/pracas/nova">
+        <div class="form-field">
+            <label for="nome">Nome da praça</label>
+            <input id="nome" type="text" name="nome" maxlength="120" required placeholder="Ex.: Cooperativa Agrícola Modelo">
+        </div>
+        <div class="form-field">
+            <label for="cidade">Cidade (opcional)</label>
+            <input id="cidade" type="text" name="cidade" maxlength="80">
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn-pill btn-red">Cadastrar praça</button>
+            <a class="btn-pill btn-ghost" href="/cotacoes">Cancelar</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

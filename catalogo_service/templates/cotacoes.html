@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Cotações | CotaAgro{% endblock %}
+
+{% block content %}
+{% set pode_publicar = session.get('user_role') in ['admin', 'operador'] %}
+<div class="admin-shell">
+    <div class="page-head">
+        <div>
+            <p class="section-kicker">Preços do dia</p>
+            <h1 class="section-title-lg">Cotações</h1>
+        </div>
+        {% if pode_publicar %}
+            <a class="btn-pill btn-red" href="/cotacoes/nova">+ Nova cotação</a>
+        {% endif %}
+    </div>
+
+    <form class="filter-bar" method="GET" action="/cotacoes">
+        <select name="produto_id" onchange="this.form.submit()" aria-label="Filtrar por produto">
+            <option value="">Todos os produtos</option>
+            {% for p in produtos %}
+                <option value="{{ p.id }}" {% if produto_sel and produto_sel|int == p.id %}selected{% endif %}>{{ p.nome }}</option>
+            {% endfor %}
+        </select>
+        <noscript><button type="submit" class="btn-pill btn-ghost btn-sm">Filtrar</button></noscript>
+    </form>
+
+    {% if cotacoes %}
+    {% set maior = cotacoes|map(attribute='preco')|max %}
+    <div class="table-wrap">
+        <table class="nf-table">
+            <thead>
+                <tr><th>Produto</th><th>Praça</th><th>Preço</th><th>Atualizado em</th><th>Ações</th></tr>
+            </thead>
+            <tbody>
+                {% for c in cotacoes %}
+                {% set pode_editar = session.get('user_role') == 'admin' or (session.get('user_role') == 'operador' and c.usuario_id == session.get('user_id')) %}
+                <tr>
+                    <td><a href="/cotacoes/{{ c.id }}">{{ c.produto_nome }}</a></td>
+                    <td>{{ c.praca_nome }}</td>
+                    <td>
+                        <span class="price-cell {{ 'price-best' if produto_sel and c.preco == maior else '' }}">R$ {{ '%.2f'|format(c.preco)|replace('.', ',') }}</span>
+                        <span class="price-unit">/ {{ c.unidade }}</span>
+                        {% if produto_sel and c.preco == maior %}<span class="pill pill-gold">melhor preço</span>{% endif %}
+                    </td>
+                    <td>{{ c.data_fmt }}</td>
+                    <td>
+                        <div class="row-actions">
+                            {% if c.produto_id in acompanhados %}
+                                <form action="/acompanhados/remover" method="POST">
+                                    <input type="hidden" name="produto_id" value="{{ c.produto_id }}">
+                                    <button type="submit" class="btn-pill btn-gold btn-sm">★ Acompanhando</button>
+                                </form>
+                            {% else %}
+                                <form action="/acompanhados/adicionar" method="POST">
+                                    <input type="hidden" name="produto_id" value="{{ c.produto_id }}">
+                                    <button type="submit" class="btn-pill btn-ghost btn-sm">+ Acompanhar</button>
+                                </form>
+                            {% endif %}
+                            {% if pode_editar %}
+                                <a class="btn-pill btn-ghost btn-sm" href="/cotacoes/{{ c.id }}/editar">Editar</a>
+                                <form action="/cotacoes/{{ c.id }}/remover" method="POST"
+                                      onsubmit="return confirm('Remover esta cotação?');">
+                                    <button type="submit" class="btn-pill btn-ghost btn-sm">Remover</button>
+                                </form>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if produto_sel %}
+        <p class="form-hint" style="margin-top:12px;">O maior preço do produto selecionado aparece em destaque.</p>
+    {% endif %}
+    {% else %}
+        <div class="empty-box">
+            Nenhuma cotação publicada{% if produto_sel %} para este produto{% endif %} ainda.
+            {% if pode_publicar %}<br><a href="/cotacoes/nova">Publique a primeira cotação</a>.{% endif %}
+        </div>
+    {% endif %}
+</div>
+{% endblock %}

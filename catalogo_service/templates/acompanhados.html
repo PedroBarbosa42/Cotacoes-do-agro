@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Acompanhados | CotaAgro{% endblock %}
+
+{% block content %}
+<div class="admin-shell">
+    <p class="section-kicker">Minha lista</p>
+    <h1 class="section-title-lg">Produtos acompanhados</h1>
+
+    {% if premium %}
+        <p class="auth-subtitle">⭐ Plano Pro: produtos ilimitados. Você acompanha {{ produtos|length }}.</p>
+    {% else %}
+        <p class="auth-subtitle">Plano Free: {{ produtos|length }}/{{ limite }} produtos.
+            <a href="{{ url_for('perfil') }}">Assine o Pro</a> para acompanhar sem limite e receber alertas.</p>
+    {% endif %}
+
+    {% if produtos %}
+    <div class="product-grid">
+        {% for p in produtos %}
+        <div class="product-card">
+            <h3>{{ p.nome }}</h3>
+            {% if p.melhor_preco is not none %}
+                <span class="price-cell price-best">R$ {{ '%.2f'|format(p.melhor_preco)|replace('.', ',') }}</span>
+                <span class="price-unit">melhor preço hoje / {{ p.unidade }}</span>
+            {% else %}
+                <span class="price-unit">Sem cotações publicadas.</span>
+            {% endif %}
+            <div class="row-actions">
+                <a class="btn-pill btn-ghost btn-sm" href="/cotacoes?produto_id={{ p.id }}">Ver preços</a>
+            </div>
+            <form action="/acompanhados/remover" method="POST">
+                <input type="hidden" name="produto_id" value="{{ p.id }}">
+                <button type="submit" class="btn-pill btn-ghost btn-sm">Parar de acompanhar</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+        <div class="empty-box">Você ainda não acompanha nenhum produto. Use o botão "+ Acompanhar" na página de <a href="/cotacoes">cotações</a>.</div>
+    {% endif %}
+</div>
+{% endblock %}

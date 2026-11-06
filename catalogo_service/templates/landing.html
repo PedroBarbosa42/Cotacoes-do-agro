@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}CotaAgro | O preço da sua praça, com alerta{% endblock %}
+
+{% block content %}
+<header class="landing-hero">
+    <div class="landing-hero-inner">
+        <p class="landing-kicker">Cotações do agro</p>
+        <h1 class="landing-title">O preço da <em>sua praça</em>, comparado e com alerta.</h1>
+        <p class="landing-lead">
+            Pare de ligar para várias cooperativas e cerealistas antes de vender a safra ou comprar insumos.
+            O CotaAgro reúne os preços de soja, milho e insumos num só lugar e avisa quando a saca chega no valor que você quer.
+        </p>
+        <div class="hero-actions">
+            <a class="btn-pill btn-red" href="/register">Criar conta grátis</a>
+            <a class="btn-pill btn-ghost" href="{{ url_for('login') }}">Já tenho conta</a>
+        </div>
+    </div>
+</header>
+
+<section class="landing-section">
+    <h2>Por que o CotaAgro</h2>
+    <p>Hoje o produtor depende de grupos de WhatsApp, telefonemas e boletins nacionais que não mostram o preço de onde ele realmente vende.</p>
+    <div class="feature-grid">
+        <div class="feature-card">
+            <span class="feature-icon">📍</span>
+            <h3>Preço da sua praça</h3>
+            <p>Cotações publicadas pelas próprias cooperativas e cerealistas, com data da última atualização.</p>
+        </div>
+        <div class="feature-card">
+            <span class="feature-icon">⚖️</span>
+            <h3>Comparação lado a lado</h3>
+            <p>Escolha um produto e veja quem paga mais, sem ligar para ninguém.</p>
+        </div>
+        <div class="feature-card">
+            <span class="feature-icon">🔔</span>
+            <h3>Alerta de preço</h3>
+            <p>Defina o valor-alvo e seja avisado quando uma cotação chegar nele (plano Pro).</p>
+        </div>
+    </div>
+</section>
+
+<section class="landing-section">
+    <h2>Planos</h2>
+    <p>Comece grátis e assine o Pro quando quiser alertas e histórico completo.</p>
+    <div class="plan-grid">
+        <div class="plan-box">
+            <h3>Free</h3>
+            <p class="plan-price">R$ 0 <small>/mês</small></p>
+            <ul class="plan-list">
+                <li>Cotações do dia</li>
+                <li>Até 3 produtos acompanhados</li>
+                <li>Histórico de 7 dias</li>
+            </ul>
+            <a class="btn-pill btn-ghost" href="/register">Começar grátis</a>
+        </div>
+        <div class="plan-box plan-box-pro">
+            <h3>Pro</h3>
+            <p class="plan-price">R$ 19,90 <small>/mês</small></p>
+            <ul class="plan-list">
+                <li>Produtos acompanhados ilimitados</li>
+                <li>Alertas de preço</li>
+                <li>Histórico completo</li>
+            </ul>
+            <a class="btn-pill btn-gold" href="/register">Quero o Pro</a>
+        </div>
+    </div>
+</section>
+
+<footer class="landing-footer">
+    CotaAgro · projeto acadêmico · Professor <a href="https://github.com/siriani">github.com/siriani</a>
+</footer>
+{% endblock %}

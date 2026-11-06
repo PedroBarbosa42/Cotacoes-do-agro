@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Perfil | CatálogoFilmes{% endblock %}
+{% block title %}Perfil | CotaAgro{% endblock %}
 
 {% block content %}
 <div class="admin-shell">
@@ -13,7 +13,7 @@
             <div class="profile-photo profile-photo-placeholder">{{ usuario.nome[0]|upper }}</div>
         {% endif %}
         <div class="profile-info">
-            <h2>{{ usuario.nome }}{% if usuario.premium %} <span class="pill pill-gold premium-badge">⭐ Premium</span>{% endif %}</h2>
+            <h2>{{ usuario.nome }}{% if usuario.premium %} <span class="pill pill-gold premium-badge">⭐ Pro</span>{% endif %}</h2>
             <p class="profile-email">{{ usuario.email }}</p>
             <p class="profile-bio">{{ usuario.bio or 'Nenhuma bio ainda.' }}</p>
         </div>
@@ -22,17 +22,20 @@
     <div class="plan-card {{ 'plan-card-premium' if usuario.premium else '' }}">
         {% if usuario.premium %}
             <h4 class="comments-heading">Seu plano</h4>
-            <p class="plan-title">⭐ Plano Premium ativo</p>
-            <p class="profile-hint">Favoritos e lista "Assistir depois" sem limite de filmes.</p>
-            <a class="btn-pill btn-ghost btn-sm" href="{{ url_for('assistir_depois_lista') }}">Abrir minha lista Assistir depois</a>
+            <p class="plan-title">⭐ Plano Pro ativo</p>
+            <p class="profile-hint">Produtos acompanhados ilimitados, alertas de preço e histórico completo.</p>
+            <a class="btn-pill btn-ghost btn-sm" href="/acompanhados">Ver produtos acompanhados</a>
         {% else %}
             <h4 class="comments-heading">Seu plano</h4>
-            <p class="plan-title">Plano gratuito</p>
+            <p class="plan-title">Plano Free</p>
             <p class="profile-hint">
-                Favoritos: {{ favoritos|length }}/{{ limite }} &nbsp;•&nbsp; Assistir depois: {{ total_assistir }}/{{ limite }}
+                Produtos acompanhados: {{ acompanhados|length }}/{{ limite }} &nbsp;•&nbsp; Histórico de 7 dias &nbsp;•&nbsp; Sem alertas
             </p>
             <form action="{{ url_for('premium_assinar') }}" method="POST">
-                <button type="submit" class="btn-pill btn-gold btn-sm">⭐ Assinar Premium — R$ 9,90/mês</button>
+                <button type="submit" class="btn-pill btn-gold btn-sm">⭐ Assinar Pro — R$ 19,90/mês</button>
+            </form>
+            <form action="{{ url_for('premium_sincronizar') }}" method="POST">
+                <button type="submit" class="btn-pill btn-ghost btn-sm">Já paguei, atualizar status</button>
             </form>
             <p class="profile-hint">Pagamento em ambiente de teste (Stripe). Cartão de teste: 4242 4242 4242 4242.</p>
         {% endif %}
@@ -53,20 +56,18 @@
         </form>
     </div>
 
-    <h4 class="comments-heading profile-fav-title">Filmes favoritados ({{ favoritos|length }})</h4>
-    {% if favoritos %}
-    <div class="row-scroll">
-        {% for fav in favoritos %}
-        <div class="title-card">
-            <div class="title-summary">
-                <img class="title-poster" src="https://image.tmdb.org/t/p/w342{{ fav.poster_path }}" alt="Pôster de {{ fav.titulo }}">
-                <div class="title-overlay"><span class="title-name">{{ fav.titulo }}</span></div>
-            </div>
+    <h4 class="comments-heading profile-fav-title">Produtos acompanhados ({{ acompanhados|length }})</h4>
+    {% if acompanhados %}
+    <div class="product-grid">
+        {% for a in acompanhados %}
+        <div class="product-card">
+            <h3>{{ a.nome }}</h3>
+            <a class="btn-pill btn-ghost btn-sm" href="/cotacoes?produto_id={{ a.id }}">Ver preços</a>
         </div>
         {% endfor %}
     </div>
     {% else %}
-        <p class="auth-subtitle">Você ainda não favoritou nenhum filme.</p>
+        <p class="auth-subtitle">Você ainda não acompanha nenhum produto.</p>
     {% endif %}
 </div>
 {% endblock %}

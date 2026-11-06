@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ cotacao.produto_nome }} | CotaAgro{% endblock %}
+
+{% block content %}
+{% set pode_editar = session.get('user_role') == 'admin' or (session.get('user_role') == 'operador' and cotacao.usuario_id == session.get('user_id')) %}
+<div class="admin-shell">
+    <p class="section-kicker">Cotação</p>
+    <h1 class="section-title-lg">{{ cotacao.produto_nome }}</h1>
+    <p class="auth-subtitle">{{ cotacao.praca_nome }}</p>
+
+    <div class="detail-grid">
+        <div class="detail-item">
+            <span>Preço</span>
+            <strong class="price-best">R$ {{ '%.2f'|format(cotacao.preco)|replace('.', ',') }}</strong>
+            <small class="price-unit">/ {{ cotacao.unidade }}</small>
+        </div>
+        <div class="detail-item">
+            <span>Atualizado em</span>
+            <strong>{{ cotacao.data_fmt }}</strong>
+        </div>
+        <div class="detail-item">
+            <span>Publicado por</span>
+            <strong>{{ cotacao.publicado_por }}</strong>
+        </div>
+    </div>
+
+    {% if cotacao.observacao %}
+        <p class="profile-bio">{{ cotacao.observacao }}</p>
+    {% endif %}
+
+    {% if cotacao.anexo_url %}
+        <p><a class="btn-pill btn-ghost btn-sm" href="{{ cotacao.anexo_url }}" target="_blank" rel="noopener">Ver tabela de preços anexada</a></p>
+    {% endif %}
+
+    <div class="row-actions" style="margin-top:22px;">
+        <a class="btn-pill btn-ghost" href="/cotacoes">← Voltar às cotações</a>
+        {% if pode_editar %}
+            <a class="btn-pill btn-red" href="/cotacoes/{{ cotacao.id }}/editar">Editar</a>
+            <form action="/cotacoes/{{ cotacao.id }}/remover" method="POST"
+                  onsubmit="return confirm('Remover esta cotação?');">
+                <button type="submit" class="btn-pill btn-ghost">Remover</button>
+            </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

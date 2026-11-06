@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% set editando = cotacao is not none and cotacao.id is defined %}
+{% block title %}{{ 'Editar cotação' if editando else 'Nova cotação' }} | CotaAgro{% endblock %}
+
+{% block content %}
+<div class="admin-shell">
+    <p class="section-kicker">{{ 'Atualizar preço' if editando else 'Publicar preço' }}</p>
+    <h1 class="section-title-lg">{{ 'Editar cotação' if editando else 'Nova cotação' }}</h1>
+
+    <form class="form-shell" method="POST" enctype="multipart/form-data"
+          action="{{ '/cotacoes/%d/editar'|format(cotacao.id) if editando else '/cotacoes/nova' }}">
+        <div class="form-field">
+            <label for="produto_id">Produto</label>
+            <select id="produto_id" name="produto_id" required>
+                {% for p in produtos %}
+                    <option value="{{ p.id }}" {% if editando and cotacao.produto_id == p.id %}selected{% endif %}>{{ p.nome }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-field">
+            <label for="praca_id">Praça (cooperativa ou cerealista)</label>
+            <select id="praca_id" name="praca_id" required>
+                {% for pr in pracas %}
+                    <option value="{{ pr.id }}" {% if editando and cotacao.praca_id == pr.id %}selected{% endif %}>{{ pr.nome }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-field">
+            <label for="preco">Preço (R$)</label>
+            <input id="preco" type="number" name="preco" step="0.01" min="0.01" required
+                   value="{{ cotacao.preco if editando else '' }}">
+        </div>
+        <div class="form-field">
+            <label for="unidade">Unidade</label>
+            <select id="unidade" name="unidade" required>
+                {% for u in ['saca 60kg', 'tonelada', 'kg', 'litro'] %}
+                    <option value="{{ u }}" {% if editando and cotacao.unidade == u %}selected{% endif %}>{{ u }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-field">
+            <label for="observacao">Observação (opcional)</label>
+            <textarea id="observacao" name="observacao" rows="3" maxlength="280"
+                      placeholder="Ex.: preço à vista, retirada na unidade">{{ cotacao.observacao if editando and cotacao.observacao else '' }}</textarea>
+        </div>
+        <div class="form-field">
+            <label for="anexo">Tabela de preços (opcional)</label>
+            <input id="anexo" type="file" name="anexo" accept="application/pdf,image/png,image/jpeg,image/webp">
+            <span class="form-hint">PDF ou imagem, até 5 MB.</span>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn-pill btn-red">{{ 'Salvar alterações' if editando else 'Publicar cotação' }}</button>
+            <a class="btn-pill btn-ghost" href="/cotacoes">Cancelar</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

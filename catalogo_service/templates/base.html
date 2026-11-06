@@ -3,19 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}CatálogoFilmes{% endblock %}</title>
+    <title>{% block title %}CotaAgro{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 <nav class="navbar">
-    <a class="navbar-brand" href="{{ url_for('index') }}">CATÁLOGO<span>FILMES</span></a>
+    <a class="navbar-brand" href="/">COTA<span>AGRO</span></a>
     {% if session.get('user_id') %}
     <div class="nav-user">
         <span class="nav-greeting">
-            {{ session['nome'] }}{% if session.get('user_role') == 'admin' %} <span class="pill pill-gold">admin</span>{% endif %}
+            {{ session['nome'] }}{% if session.get('user_role') == 'admin' %} <span class="pill pill-gold">admin</span>{% elif session.get('user_role') == 'operador' %} <span class="pill pill-gray">operador</span>{% endif %}
         </span>
-        <a class="nav-link" href="{{ url_for('index') }}">Catálogo</a>
-        <a class="nav-link" href="{{ url_for('assistir_depois_lista') }}">Assistir depois</a>
+        <a class="nav-link" href="/cotacoes">Cotações</a>
+        <a class="nav-link" href="/acompanhados">Acompanhados</a>
         <a class="nav-link" href="{{ url_for('perfil') }}">Perfil</a>
         {% if session.get('user_role') == 'admin' %}
             <a class="nav-link" href="{{ url_for('admin_usuarios') }}">Usuários</a>
@@ -23,6 +23,11 @@
             <a class="nav-link" href="{{ url_for('admin_logs') }}">Logs</a>
         {% endif %}
         <a class="btn-pill" href="/logout">Sair</a>
+    </div>
+    {% else %}
+    <div class="nav-guest">
+        <a class="nav-link" href="{{ url_for('login') }}">Entrar</a>
+        <a class="btn-pill btn-red" href="/register">Criar conta</a>
     </div>
     {% endif %}
 </nav>

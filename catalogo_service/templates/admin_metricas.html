@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Métricas | Admin{% endblock %}
+{% block title %}Métricas | Admin | CotaAgro{% endblock %}
 
 {% block content %}
 <div class="admin-shell">
@@ -12,16 +12,16 @@
             <span class="metric-label">Usuários cadastrados</span>
         </div>
         <div class="metric-card">
-            <span class="metric-number">{{ metricas.total_favoritos }}</span>
-            <span class="metric-label">Favoritos registrados</span>
+            <span class="metric-number">{{ metricas.total_cotacoes }}</span>
+            <span class="metric-label">Cotações publicadas</span>
         </div>
         <div class="metric-card">
-            <span class="metric-number">{{ metricas.filmes_distintos_favoritados }}</span>
-            <span class="metric-label">Filmes distintos favoritados</span>
+            <span class="metric-number">{{ metricas.total_pracas }}</span>
+            <span class="metric-label">Praças cadastradas</span>
         </div>
         <div class="metric-card">
-            <span class="metric-number">{{ metricas.total_comentarios }}</span>
-            <span class="metric-label">Comentários publicados</span>
+            <span class="metric-number">{{ metricas.total_acompanhamentos }}</span>
+            <span class="metric-label">Produtos acompanhados</span>
         </div>
     </div>
 
