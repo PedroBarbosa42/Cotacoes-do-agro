@@ -8,7 +8,8 @@ import stripe
 from mysql.connector import pooling
 from functools import wraps
 from datetime import datetime, timezone, timedelta
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
+from decimal import Decimal, InvalidOperation
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from minio import Minio
 from minio.error import S3Error
@@ -25,7 +26,8 @@ STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
 BASE_URL = os.getenv('BASE_URL', 'http://localhost:8225').rstrip('/')
 
 LIMITE_GRATIS = 3
-TABELAS_COM_LIMITE = {'favoritos', 'assistir_depois'}
+ROLES_VALIDOS = ('produtor', 'operador', 'admin')
+TABELAS_COM_LIMITE = {'acompanhados'}
 
 db_pool = pooling.MySQLConnectionPool(
     pool_name="catalogo_pool",
@@ -93,6 +95,20 @@ def admin_required(f):
             return jsonify({"erro": "Ação restrita a administradores."}), 403
         return f(*args, **kwargs)
     return decorated
+
+def role_required(*roles):
+    """Exige login e um dos papéis informados; senão responde 403 e registra no log."""
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if 'user_id' not in session:
+                return jsonify({"erro": "Não autenticado"}), 401
+            if session.get('user_role') not in roles:
+                registrar_evento(session['user_id'], 'acesso_negado', f'tentou acessar {request.path}')
+                return jsonify({"erro": "Ação não permitida para o seu papel."}), 403
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
 
 def usuario_eh_premium(user_id):
     conn = get_db_connection()
@@ -187,203 +203,441 @@ def logout():
     if 'user_id' in session:
         registrar_evento(session['user_id'], 'logout')
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for('index'))
+
+# ---------------------------------------------------------------------------
+# CotaAgro: landing, cotações, praças e produtos acompanhados
+# ---------------------------------------------------------------------------
+
+UNIDADES_VALIDAS = ('saca 60kg', 'tonelada', 'kg', 'litro')
+EXTENSOES_ANEXO = {'pdf', 'png', 'jpg', 'jpeg', 'webp'}
+PREFIXO_ANEXOS = 'cotacoes'
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated
+
+def formatar_data(dt):
+    return dt.strftime('%d/%m/%Y %H:%M') if dt else ''
+
+def parse_preco(texto):
+    try:
+        valor = Decimal((texto or '').strip().replace(',', '.'))
+    except InvalidOperation:
+        return None
+    if valor <= 0 or valor >= Decimal('100000000'):
+        return None
+    return valor.quantize(Decimal('0.01'))
+
+def pode_gerenciar(praca_usuario_id):
+    """Admin gerencia tudo; operador só as cotações das próprias praças."""
+    papel = session.get('user_role')
+    if papel == 'admin':
+        return True
+    return papel == 'operador' and praca_usuario_id == session.get('user_id')
+
+def pracas_permitidas(cursor):
+    if session.get('user_role') == 'admin':
+        cursor.execute("SELECT id, nome FROM pracas ORDER BY nome")
+    else:
+        cursor.execute("SELECT id, nome FROM pracas WHERE usuario_id = %s ORDER BY nome", (session['user_id'],))
+    return cursor.fetchall()
+
+def buscar_cotacao(cursor, cotacao_id):
+    cursor.execute("""
+        SELECT c.id, c.produto_id, p.nome AS produto_nome, c.praca_id, pr.nome AS praca_nome,
+               pr.usuario_id AS usuario_id, c.preco, c.unidade, c.observacao, c.anexo_key,
+               c.atualizado_em, u.nome AS publicado_por
+        FROM cotacoes c
+        JOIN produtos p ON p.id = c.produto_id
+        JOIN pracas pr ON pr.id = c.praca_id
+        JOIN usuarios u ON u.id = c.usuario_id
+        WHERE c.id = %s
+    """, (cotacao_id,))
+    cot = cursor.fetchone()
+    if cot:
+        cot['preco'] = float(cot['preco'])
+        cot['data_fmt'] = formatar_data(cot['atualizado_em'])
+    return cot
+
+def salvar_anexo(arquivo):
+    """Envia o anexo (PDF ou imagem) ao MinIO. Retorna (chave, erro)."""
+    if not arquivo or arquivo.filename == '':
+        return None, None
+    if '.' not in arquivo.filename or arquivo.filename.rsplit('.', 1)[1].lower() not in EXTENSOES_ANEXO:
+        return None, 'Anexo inválido. Envie PDF, png, jpg, jpeg ou webp.'
+    tipo = arquivo.mimetype or ''
+    if not (tipo == 'application/pdf' or tipo.startswith('image/')):
+        return None, 'Anexo inválido: o tipo de conteúdo não é PDF nem imagem.'
+    try:
+        garantir_bucket()
+        extensao = arquivo.filename.rsplit('.', 1)[1].lower()
+        chave = f"{PREFIXO_ANEXOS}/{session['user_id']}/{uuid.uuid4().hex}.{extensao}"
+        arquivo.stream.seek(0, os.SEEK_END)
+        tamanho = arquivo.stream.tell()
+        arquivo.stream.seek(0)
+        minio_client.put_object(MINIO_BUCKET, chave, arquivo.stream, length=tamanho, content_type=tipo)
+    except S3Error as e:
+        return None, f'Erro ao enviar o anexo para o object storage: {e}'
+    return chave, None
+
+def remover_anexo(chave):
+    if not chave:
+        return
+    try:
+        minio_client.remove_object(MINIO_BUCKET, chave)
+    except S3Error:
+        pass
+
+def ler_formulario_cotacao(cursor):
+    """Valida o formulário. Retorna (dados, erro)."""
+    try:
+        produto_id = int(request.form.get('produto_id', ''))
+        praca_id = int(request.form.get('praca_id', ''))
+    except ValueError:
+        return None, 'Produto ou praça inválidos.'
+
+    cursor.execute("SELECT nome FROM produtos WHERE id = %s", (produto_id,))
+    produto = cursor.fetchone()
+    if not produto:
+        return None, 'Produto não encontrado.'
+
+    permitidas = {p['id']: p['nome'] for p in pracas_permitidas(cursor)}
+    if praca_id not in permitidas:
+        registrar_evento(session['user_id'], 'acesso_negado', f'tentou publicar na praça {praca_id}')
+        return 'FORBIDDEN', None
+
+    preco = parse_preco(request.form.get('preco'))
+    if preco is None:
+        return None, 'Preço inválido. Informe um valor maior que zero.'
+
+    unidade = request.form.get('unidade')
+    if unidade not in UNIDADES_VALIDAS:
+        return None, 'Unidade inválida.'
+
+    return {
+        'produto_id': produto_id, 'produto_nome': produto['nome'],
+        'praca_id': praca_id, 'praca_nome': permitidas[praca_id],
+        'preco': preco, 'unidade': unidade,
+        'observacao': request.form.get('observacao', '').strip()[:280] or None,
+    }, None
 
 @app.route('/')
 def index():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
+    if 'user_id' in session:
+        return redirect('/cotacoes')
+    return render_template('landing.html')
 
-    api_key = os.getenv('TMDB_API_KEY')
-    url_busca = f"https://api.themoviedb.org/3/search/person?query=Tom+Hanks&api_key={api_key}"
-    search_res = requests.get(url_busca).json()
-
-    print("Retorno TMDB:", search_res)
-
-    movies = []
-    if 'results' in search_res and len(search_res['results']) > 0:
-        person_id = search_res['results'][0]['id']
-        movies_res = requests.get(f"https://api.themoviedb.org/3/person/{person_id}/movie_credits?api_key={api_key}").json()
-        movies = movies_res.get('cast', [])
-    else:
-        flash('Erro de API: Filme não encontrado ou chave TMDB inválida. Verifique os logs.')
+@app.route('/cotacoes', methods=['GET'])
+@login_required
+def cotacoes_lista():
+    produto_sel = request.args.get('produto_id', type=int)
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("SELECT tmdb_movie_id FROM favoritos WHERE usuario_id = %s", (session['user_id'],))
-    favoritos = {row['tmdb_movie_id'] for row in cursor.fetchall()}
+    cursor.execute("SELECT id, nome FROM produtos ORDER BY nome")
+    produtos = cursor.fetchall()
 
-    cursor.execute("SELECT tmdb_movie_id FROM assistir_depois WHERE usuario_id = %s", (session['user_id'],))
-    assistir = {row['tmdb_movie_id'] for row in cursor.fetchall()}
+    consulta = """
+        SELECT c.id, c.produto_id, p.nome AS produto_nome, pr.nome AS praca_nome,
+               pr.usuario_id AS usuario_id, c.preco, c.unidade, c.atualizado_em
+        FROM cotacoes c
+        JOIN produtos p ON p.id = c.produto_id
+        JOIN pracas pr ON pr.id = c.praca_id
+    """
+    parametros = ()
+    if produto_sel:
+        consulta += " WHERE c.produto_id = %s"
+        parametros = (produto_sel,)
+    consulta += " ORDER BY p.nome, c.preco DESC"
+    cursor.execute(consulta, parametros)
+    cotacoes = cursor.fetchall()
+    for c in cotacoes:
+        c['preco'] = float(c['preco'])
+        c['data_fmt'] = formatar_data(c['atualizado_em'])
 
-    cursor.execute("""
-        SELECT c.id, c.tmdb_movie_id, c.texto, c.usuario_id, u.nome
-        FROM comentarios c
-        JOIN usuarios u ON u.id = c.usuario_id
-    """)
-    comentarios = {}
-    for row in cursor.fetchall():
-        comentarios.setdefault(row['tmdb_movie_id'], []).append(row)
+    cursor.execute("SELECT produto_id FROM acompanhados WHERE usuario_id = %s", (session['user_id'],))
+    acompanhados = [row['produto_id'] for row in cursor.fetchall()]
 
     cursor.close()
     conn.close()
 
-    return render_template('index.html', movies=movies, favoritos=favoritos,
-                           assistir=assistir, comentarios=comentarios)
+    return render_template('cotacoes.html', cotacoes=cotacoes, produtos=produtos,
+                           produto_sel=produto_sel, acompanhados=acompanhados)
 
-@app.route('/favoritar', methods=['POST'])
-def favoritar():
-    if 'user_id' not in session: return redirect(url_for('login'))
-    movie_id = request.form['movie_id']
-    titulo = request.form['titulo']
-    poster_path = request.form['poster_path']
-
-    if atingiu_limite('favoritos', session['user_id']):
-        registrar_evento(session['user_id'], 'limite_atingido', 'favoritos')
-        flash(f'Limite de {LIMITE_GRATIS} favoritos do plano gratuito atingido. Assine o Premium para favoritar sem limite.', 'danger')
-        return redirect(url_for('perfil'))
-
+@app.route('/cotacoes/<int:cotacao_id>', methods=['GET'])
+@login_required
+def cotacao_detalhe(cotacao_id):
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
+    cotacao = buscar_cotacao(cursor, cotacao_id)
+    cursor.close()
+    conn.close()
+
+    if not cotacao:
+        abort(404)
+
+    cotacao['anexo_url'] = url_for('cotacao_anexo', cotacao_id=cotacao_id) if cotacao['anexo_key'] else None
+    return render_template('cotacao_detalhe.html', cotacao=cotacao)
+
+@app.route('/cotacoes/<int:cotacao_id>/anexo', methods=['GET'])
+@login_required
+def cotacao_anexo(cotacao_id):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT anexo_key FROM cotacoes WHERE id = %s", (cotacao_id,))
+    linha = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if not linha or not linha['anexo_key']:
+        return ('', 404)
+
     try:
-        cursor.execute("INSERT INTO favoritos (usuario_id, tmdb_movie_id, titulo, poster_path) VALUES (%s, %s, %s, %s)",
-                       (session['user_id'], movie_id, titulo, poster_path))
-        conn.commit()
-        registrar_evento(session['user_id'], 'favoritar', titulo)
-    except mysql.connector.IntegrityError:
-        pass
+        objeto = minio_client.get_object(MINIO_BUCKET, linha['anexo_key'])
+    except S3Error:
+        return ('', 404)
+
+    def gerar():
+        try:
+            for pedaco in objeto.stream(32 * 1024):
+                yield pedaco
+        finally:
+            objeto.close()
+            objeto.release_conn()
+
+    resposta = Response(gerar(), mimetype=objeto.headers.get('Content-Type', 'application/octet-stream'))
+    resposta.headers['Cache-Control'] = 'private, max-age=3600'
+    resposta.headers['X-Content-Type-Options'] = 'nosniff'
+    return resposta
+
+@app.route('/cotacoes/nova', methods=['GET', 'POST'])
+@role_required('operador', 'admin')
+def cotacao_nova():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        pracas = pracas_permitidas(cursor)
+        if not pracas:
+            flash('Cadastre a sua praça (cooperativa ou cerealista) antes de publicar cotações.', 'danger')
+            return redirect('/pracas/nova')
+
+        if request.method == 'POST':
+            dados, erro = ler_formulario_cotacao(cursor)
+            if dados == 'FORBIDDEN':
+                return jsonify({"erro": "Você só pode publicar cotações nas suas próprias praças."}), 403
+            if erro:
+                flash(erro, 'danger')
+            else:
+                chave, erro_anexo = salvar_anexo(request.files.get('anexo'))
+                if erro_anexo:
+                    flash(erro_anexo, 'danger')
+                else:
+                    cursor.execute("""
+                        INSERT INTO cotacoes (produto_id, praca_id, usuario_id, preco, unidade, observacao, anexo_key)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (dados['produto_id'], dados['praca_id'], session['user_id'],
+                          dados['preco'], dados['unidade'], dados['observacao'], chave))
+                    conn.commit()
+                    registrar_evento(session['user_id'], 'cotacao_publicada',
+                                     f"{dados['produto_nome']} em {dados['praca_nome']}: R$ {dados['preco']}")
+                    flash('Cotação publicada!', 'success')
+                    return redirect('/cotacoes')
+
+        cursor.execute("SELECT id, nome FROM produtos ORDER BY nome")
+        produtos = cursor.fetchall()
     finally:
         cursor.close()
         conn.close()
-    return redirect(url_for('index'))
 
-@app.route('/desfavoritar', methods=['POST'])
-def desfavoritar():
-    if 'user_id' not in session: return redirect(url_for('login'))
-    movie_id = request.form['movie_id']
+    return render_template('cotacao_form.html', cotacao=None, produtos=produtos, pracas=pracas)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM favoritos WHERE usuario_id = %s AND tmdb_movie_id = %s",
-                   (session['user_id'], movie_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    registrar_evento(session['user_id'], 'desfavoritar', movie_id)
-    return redirect(url_for('index'))
-
-@app.route('/assistir-depois', methods=['GET'])
-def assistir_depois_lista():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
-
+@app.route('/cotacoes/<int:cotacao_id>/editar', methods=['GET', 'POST'])
+@role_required('operador', 'admin')
+def cotacao_editar(cotacao_id):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT tmdb_movie_id, titulo, poster_path FROM assistir_depois WHERE usuario_id = %s ORDER BY criado_em DESC",
-        (session['user_id'],)
-    )
-    filmes = cursor.fetchall()
+    try:
+        cotacao = buscar_cotacao(cursor, cotacao_id)
+        if not cotacao:
+            return jsonify({"erro": "Cotação não encontrada."}), 404
+        if not pode_gerenciar(cotacao['usuario_id']):
+            registrar_evento(session['user_id'], 'acesso_negado', f'tentou editar a cotação {cotacao_id} de outra praça')
+            return jsonify({"erro": "Você só pode editar cotações das suas próprias praças."}), 403
+
+        if request.method == 'POST':
+            dados, erro = ler_formulario_cotacao(cursor)
+            if dados == 'FORBIDDEN':
+                return jsonify({"erro": "Você só pode usar as suas próprias praças."}), 403
+            if erro:
+                flash(erro, 'danger')
+            else:
+                chave, erro_anexo = salvar_anexo(request.files.get('anexo'))
+                if erro_anexo:
+                    flash(erro_anexo, 'danger')
+                else:
+                    chave_final = chave or cotacao['anexo_key']
+                    cursor.execute("""
+                        UPDATE cotacoes
+                        SET produto_id = %s, praca_id = %s, preco = %s, unidade = %s,
+                            observacao = %s, anexo_key = %s, atualizado_em = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (dados['produto_id'], dados['praca_id'], dados['preco'], dados['unidade'],
+                          dados['observacao'], chave_final, cotacao_id))
+                    conn.commit()
+                    if chave and cotacao['anexo_key']:
+                        remover_anexo(cotacao['anexo_key'])
+                    registrar_evento(session['user_id'], 'cotacao_atualizada',
+                                     f"{dados['produto_nome']} em {dados['praca_nome']}: R$ {dados['preco']}")
+                    flash('Cotação atualizada!', 'success')
+                    return redirect('/cotacoes')
+
+        cursor.execute("SELECT id, nome FROM produtos ORDER BY nome")
+        produtos = cursor.fetchall()
+        pracas = pracas_permitidas(cursor)
+    finally:
+        cursor.close()
+        conn.close()
+
+    return render_template('cotacao_form.html', cotacao=cotacao, produtos=produtos, pracas=pracas)
+
+@app.route('/cotacoes/<int:cotacao_id>/remover', methods=['POST'])
+@role_required('operador', 'admin')
+def cotacao_remover(cotacao_id):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cotacao = buscar_cotacao(cursor, cotacao_id)
+        if not cotacao:
+            return jsonify({"erro": "Cotação não encontrada."}), 404
+        if not pode_gerenciar(cotacao['usuario_id']):
+            registrar_evento(session['user_id'], 'acesso_negado', f'tentou remover a cotação {cotacao_id} de outra praça')
+            return jsonify({"erro": "Você só pode remover cotações das suas próprias praças."}), 403
+
+        cursor.execute("DELETE FROM cotacoes WHERE id = %s", (cotacao_id,))
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+    remover_anexo(cotacao['anexo_key'])
+    registrar_evento(session['user_id'], 'cotacao_removida',
+                     f"{cotacao['produto_nome']} em {cotacao['praca_nome']}")
+    flash('Cotação removida.', 'success')
+    return redirect('/cotacoes')
+
+@app.route('/pracas/nova', methods=['GET', 'POST'])
+@role_required('operador', 'admin')
+def praca_nova():
+    if request.method == 'POST':
+        nome = request.form.get('nome', '').strip()[:120]
+        cidade = request.form.get('cidade', '').strip()[:80] or None
+        if not nome:
+            flash('Informe o nome da praça.', 'danger')
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("INSERT INTO pracas (nome, cidade, usuario_id) VALUES (%s, %s, %s)",
+                               (nome, cidade, session['user_id']))
+                conn.commit()
+                registrar_evento(session['user_id'], 'praca_criada', nome)
+                flash('Praça cadastrada! Agora você pode publicar cotações.', 'success')
+                return redirect('/cotacoes/nova')
+            except mysql.connector.IntegrityError:
+                flash('Já existe uma praça com esse nome.', 'danger')
+            finally:
+                cursor.close()
+                conn.close()
+    return render_template('praca_form.html')
+
+@app.route('/acompanhados', methods=['GET'])
+@login_required
+def acompanhados_lista():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        SELECT p.id, p.nome, p.unidade_padrao AS unidade,
+               (SELECT MAX(c.preco) FROM cotacoes c WHERE c.produto_id = p.id) AS melhor_preco
+        FROM acompanhados a
+        JOIN produtos p ON p.id = a.produto_id
+        WHERE a.usuario_id = %s
+        ORDER BY a.criado_em DESC
+    """, (session['user_id'],))
+    produtos = cursor.fetchall()
     cursor.close()
     conn.close()
 
-    return render_template('assistir_depois.html', filmes=filmes,
+    for p in produtos:
+        p['melhor_preco'] = float(p['melhor_preco']) if p['melhor_preco'] is not None else None
+
+    return render_template('acompanhados.html', produtos=produtos,
                            premium=usuario_eh_premium(session['user_id']), limite=LIMITE_GRATIS)
 
-@app.route('/assistir-depois/adicionar', methods=['POST'])
-def assistir_depois_adicionar():
-    if 'user_id' not in session: return redirect(url_for('login'))
-    movie_id = request.form['movie_id']
-    titulo = request.form['titulo']
-    poster_path = request.form['poster_path']
+@app.route('/acompanhados/adicionar', methods=['POST'])
+@login_required
+def acompanhados_adicionar():
+    produto_id = request.form.get('produto_id', type=int)
+    if not produto_id:
+        flash('Produto inválido.', 'danger')
+        return redirect(request.referrer or '/cotacoes')
 
-    if atingiu_limite('assistir_depois', session['user_id']):
-        registrar_evento(session['user_id'], 'limite_atingido', 'assistir_depois')
-        flash(f'Limite de {LIMITE_GRATIS} filmes na lista "Assistir depois" do plano gratuito. Assine o Premium para uma lista sem limite.', 'danger')
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT nome FROM produtos WHERE id = %s", (produto_id,))
+    produto = cursor.fetchone()
+    cursor.execute("SELECT 1 AS ja FROM acompanhados WHERE usuario_id = %s AND produto_id = %s",
+                   (session['user_id'], produto_id))
+    ja_acompanha = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if not produto:
+        flash('Produto não encontrado.', 'danger')
+        return redirect(request.referrer or '/cotacoes')
+    if ja_acompanha:
+        return redirect(request.referrer or '/cotacoes')
+
+    if atingiu_limite('acompanhados', session['user_id']):
+        registrar_evento(session['user_id'], 'limite_atingido', 'acompanhados')
+        flash(f'Limite de {LIMITE_GRATIS} produtos acompanhados do plano Free atingido. Assine o Pro para acompanhar sem limite.', 'danger')
         return redirect(url_for('perfil'))
 
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "INSERT INTO assistir_depois (usuario_id, tmdb_movie_id, titulo, poster_path) VALUES (%s, %s, %s, %s)",
-            (session['user_id'], movie_id, titulo, poster_path))
+        cursor.execute("INSERT INTO acompanhados (usuario_id, produto_id) VALUES (%s, %s)",
+                       (session['user_id'], produto_id))
         conn.commit()
-        registrar_evento(session['user_id'], 'assistir_depois_adicionar', titulo)
-        flash('Filme adicionado em "Assistir depois".', 'success')
+        registrar_evento(session['user_id'], 'produto_acompanhado', produto['nome'])
+        flash(f"Você agora acompanha {produto['nome']}.", 'success')
     except mysql.connector.IntegrityError:
         pass
     finally:
         cursor.close()
         conn.close()
-    return redirect(url_for('index'))
+    return redirect(request.referrer or '/cotacoes')
 
-@app.route('/assistir-depois/remover', methods=['POST'])
-def assistir_depois_remover():
-    if 'user_id' not in session: return redirect(url_for('login'))
-    movie_id = request.form['movie_id']
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM assistir_depois WHERE usuario_id = %s AND tmdb_movie_id = %s",
-                   (session['user_id'], movie_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    registrar_evento(session['user_id'], 'assistir_depois_remover', movie_id)
-    return redirect(request.referrer or url_for('assistir_depois_lista'))
-
-@app.route('/comentar', methods=['POST'])
-def comentar():
-    if 'user_id' not in session: return redirect(url_for('login'))
-    movie_id = request.form['movie_id']
-    texto = request.form['texto']
+@app.route('/acompanhados/remover', methods=['POST'])
+@login_required
+def acompanhados_remover():
+    produto_id = request.form.get('produto_id', type=int)
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO comentarios (usuario_id, tmdb_movie_id, texto) VALUES (%s, %s, %s)",
-                   (session['user_id'], movie_id, texto))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    registrar_evento(session['user_id'], 'comentar', texto[:100])
-    return redirect(url_for('index'))
-
-@app.route('/deletar-comentario/<int:comentario_id>', methods=['POST'])
-def deletar_comentario(comentario_id):
-    if 'user_id' not in session:
-        return jsonify({"erro": "Não autenticado"}), 401
-
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT usuario_id FROM comentarios WHERE id = %s", (comentario_id,))
-    comentario = cursor.fetchone()
-
-    if not comentario:
-        cursor.close()
-        conn.close()
-        return jsonify({"erro": "Comentário não encontrado"}), 404
-
-    eh_dono = comentario['usuario_id'] == session['user_id']
-    eh_admin = session.get('user_role') == 'admin'
-
-    if not eh_dono and not eh_admin:
-        cursor.close()
-        conn.close()
-        registrar_evento(session['user_id'], 'acesso_negado', f'tentou apagar comentário {comentario_id} de outro usuário')
-        return jsonify({"erro": "Ação restrita: apenas o autor do comentário ou um admin podem apagá-lo."}), 403
-
-    cursor.execute("DELETE FROM comentarios WHERE id = %s", (comentario_id,))
+    cursor.execute("DELETE FROM acompanhados WHERE usuario_id = %s AND produto_id = %s",
+                   (session['user_id'], produto_id))
     conn.commit()
     cursor.close()
     conn.close()
 
-    tipo = 'moderação' if eh_admin and not eh_dono else 'próprio'
-    registrar_evento(session['user_id'], 'apagar_comentario', f'comentário {comentario_id} ({tipo})')
-
-    flash('Comentário apagado.', 'success')
-    return redirect(url_for('index'))
+    registrar_evento(session['user_id'], 'produto_desacompanhado', str(produto_id))
+    return redirect(request.referrer or '/acompanhados')
 
 @app.route('/perfil', methods=['GET'])
 def perfil():
@@ -395,14 +649,14 @@ def perfil():
     cursor.execute("SELECT nome, email, bio, foto_key, premium FROM usuarios WHERE id = %s", (session['user_id'],))
     usuario = cursor.fetchone()
 
-    cursor.execute(
-        "SELECT tmdb_movie_id, titulo, poster_path FROM favoritos WHERE usuario_id = %s ORDER BY criado_em DESC",
-        (session['user_id'],)
-    )
-    favoritos = cursor.fetchall()
-
-    cursor.execute("SELECT COUNT(*) AS total FROM assistir_depois WHERE usuario_id = %s", (session['user_id'],))
-    total_assistir = cursor.fetchone()['total']
+    cursor.execute("""
+        SELECT p.id, p.nome
+        FROM acompanhados a
+        JOIN produtos p ON p.id = a.produto_id
+        WHERE a.usuario_id = %s
+        ORDER BY a.criado_em DESC
+    """, (session['user_id'],))
+    acompanhados = cursor.fetchall()
     cursor.close()
     conn.close()
 
@@ -411,8 +665,8 @@ def perfil():
         versao = usuario['foto_key'].rsplit('/', 1)[-1].split('.')[0]
         foto_url = url_for('foto_perfil', usuario_id=session['user_id'], v=versao)
 
-    return render_template('perfil.html', usuario=usuario, favoritos=favoritos, foto_url=foto_url,
-                           total_assistir=total_assistir, limite=LIMITE_GRATIS)
+    return render_template('perfil.html', usuario=usuario, acompanhados=acompanhados,
+                           foto_url=foto_url, limite=LIMITE_GRATIS)
 
 @app.route('/foto/<int:usuario_id>', methods=['GET'])
 def foto_perfil(usuario_id):
@@ -541,7 +795,7 @@ def premium_assinar():
         return redirect(url_for('login'))
 
     if usuario_eh_premium(session['user_id']):
-        flash('Você já é Premium.', 'success')
+        flash('Você já é Pro.', 'success')
         return redirect(url_for('perfil'))
 
     if not (stripe.api_key or '').startswith('sk_test_'):
@@ -587,12 +841,12 @@ def premium_sucesso():
         try:
             cs = stripe.checkout.Session.retrieve(sid)
             if ativar_premium_se_valido(cs, session['user_id']):
-                flash('Pagamento confirmado! Você agora é Premium.', 'success')
+                flash('Pagamento confirmado! Você agora é Pro.', 'success')
                 return redirect(url_for('perfil'))
         except stripe.StripeError:
             pass
 
-    flash('Pagamento recebido. Se o Premium ainda não apareceu, clique em "Já paguei, atualizar status" no perfil.', 'success')
+    flash('Pagamento recebido. Se o plano Pro ainda não apareceu, clique em "Já paguei, atualizar status" no perfil.', 'success')
     return redirect(url_for('perfil'))
 
 @app.route('/premium/sincronizar', methods=['POST'])
@@ -604,7 +858,7 @@ def premium_sincronizar():
         sessoes = stripe.checkout.Session.list(limit=50)
         for cs in sessoes.data:
             if ativar_premium_se_valido(cs, session['user_id']):
-                flash('Premium ativado! Pagamento confirmado no Stripe.', 'success')
+                flash('Plano Pro ativado! Pagamento confirmado no Stripe.', 'success')
                 return redirect(url_for('perfil'))
     except stripe.StripeError as e:
         flash(f'Não foi possível consultar o Stripe: {e}', 'danger')
@@ -665,6 +919,10 @@ def admin_usuarios():
 def admin_alterar_role(usuario_id):
     novo_role = request.form.get('role')
 
+    if novo_role not in ROLES_VALIDOS:
+        flash("Papel inválido. Use produtor, operador ou admin.", 'danger')
+        return redirect(url_for('admin_usuarios'))
+
     resposta = requests.put(
         f'http://auth_api:5001/usuarios/{usuario_id}/role',
         json={'role': novo_role}
@@ -702,14 +960,14 @@ def admin_metricas():
     cursor.execute("SELECT COUNT(*) AS total FROM usuarios")
     total_usuarios = cursor.fetchone()['total']
 
-    cursor.execute("SELECT COUNT(*) AS total FROM favoritos")
-    total_favoritos = cursor.fetchone()['total']
+    cursor.execute("SELECT COUNT(*) AS total FROM cotacoes")
+    total_cotacoes = cursor.fetchone()['total']
 
-    cursor.execute("SELECT COUNT(DISTINCT tmdb_movie_id) AS total FROM favoritos")
-    filmes_distintos_favoritados = cursor.fetchone()['total']
+    cursor.execute("SELECT COUNT(*) AS total FROM pracas")
+    total_pracas = cursor.fetchone()['total']
 
-    cursor.execute("SELECT COUNT(*) AS total FROM comentarios")
-    total_comentarios = cursor.fetchone()['total']
+    cursor.execute("SELECT COUNT(*) AS total FROM acompanhados")
+    total_acompanhamentos = cursor.fetchone()['total']
 
     cursor.execute("SELECT role, COUNT(*) AS total FROM usuarios GROUP BY role")
     usuarios_por_papel = cursor.fetchall()
@@ -719,9 +977,9 @@ def admin_metricas():
 
     metricas = {
         "total_usuarios": total_usuarios,
-        "total_favoritos": total_favoritos,
-        "filmes_distintos_favoritados": filmes_distintos_favoritados,
-        "total_comentarios": total_comentarios,
+        "total_cotacoes": total_cotacoes,
+        "total_pracas": total_pracas,
+        "total_acompanhamentos": total_acompanhamentos,
         "usuarios_por_papel": usuarios_por_papel,
     }
 
@@ -771,4 +1029,3 @@ def reset_password():
             flash(erro, 'danger')
 
     return render_template('reset_password.html', token=token)
-

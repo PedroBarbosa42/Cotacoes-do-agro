@@ -10,6 +10,8 @@ from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
+ROLES_VALIDOS = ('produtor', 'operador', 'admin')
+
 db_pool = pooling.MySQLConnectionPool(
     pool_name="auth_pool",
     pool_size=5,
@@ -38,8 +40,8 @@ Se você não solicitou, apenas ignore este e-mail.
 """
 
     mensagem = MIMEText(corpo_email)
-    mensagem['Subject'] = 'Recuperação de Senha - Catálogo de Filmes'
-    mensagem['From'] = os.getenv('MAIL_FROM', 'seguranca@catalogofilmes.com')
+    mensagem['Subject'] = 'Recuperação de Senha - CotaAgro'
+    mensagem['From'] = os.getenv('MAIL_FROM', 'seguranca@cotaagro.com')
     mensagem['To'] = email_destino
 
     try:
@@ -79,7 +81,7 @@ def register():
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('INSERT INTO usuarios (nome, email, senha_hash, role) VALUES (%s, %s, %s, %s)',
-                       (nome, email, senha_hash, 'usuario'))
+                       (nome, email, senha_hash, 'produtor'))
         conn.commit()
         cursor.close()
         conn.close()
@@ -129,8 +131,8 @@ def atualizar_role(usuario_id):
     dados = request.get_json()
     novo_role = dados.get('role')
 
-    if novo_role not in ('usuario', 'admin'):
-        return jsonify({"erro": "role inválido. Use 'usuario' ou 'admin'."}), 400
+    if novo_role not in ROLES_VALIDOS:
+        return jsonify({"erro": "role inválido. Use 'produtor', 'operador' ou 'admin'."}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -157,8 +159,9 @@ def deletar_usuario(usuario_id):
         conn.close()
         return jsonify({"erro": "Usuário não encontrado"}), 404
 
-    cursor.execute('DELETE FROM favoritos WHERE usuario_id = %s', (usuario_id,))
-    cursor.execute('DELETE FROM comentarios WHERE usuario_id = %s', (usuario_id,))
+    cursor.execute('DELETE FROM acompanhados WHERE usuario_id = %s', (usuario_id,))
+    cursor.execute('DELETE FROM cotacoes WHERE usuario_id = %s', (usuario_id,))
+    cursor.execute('DELETE FROM pracas WHERE usuario_id = %s', (usuario_id,))
     cursor.execute('DELETE FROM reset_tokens WHERE usuario_id = %s', (usuario_id,))
     cursor.execute('DELETE FROM usuarios WHERE id = %s', (usuario_id,))
     conn.commit()
