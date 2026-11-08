@@ -2,6 +2,8 @@
 
 Projeto da disciplina do professor [@siriani](https://github.com/siriani). Evolução do repositório [CatalogoFilmes](https://github.com/PedroBarbosa42/CatalogoFilmes), do qual este repositório herda todo o histórico de commits.
 
+**Sistema no ar:** [https://pedro-ferreira-isw055.lapps.studio/](https://pedro-ferreira-isw055.lapps.studio/)
+
 ---
 
 ## 1. Nome e frase
@@ -82,19 +84,94 @@ Cobrança recorrente via **Stripe** (modo de teste durante o desenvolvimento), s
 
 ## Mapa de reaproveitamento
 
-| Peça do projeto atual | O que vira no SaaS | No CotaAgro |
+| Peça do projeto anterior | O que virou no SaaS | No CotaAgro |
 |---|---|---|
-| Catálogo de filmes (TMDB) | Recurso principal do negócio | Cotações: produto, preço, praça (cooperativa/cerealista), data |
-| Microsserviço de login + RBAC | Papéis do negócio | `admin`, `operador` (cooperativa ou cerealista que publica preços), `produtor` |
-| Logs e auditoria (log_service, Redis Streams) | Eventos de negócio | "cotação publicada", "preço atualizado", "alerta disparado", "cotação consultada" |
-| Upload e perfil (MinIO) | Arquivos do domínio | Logo da cooperativa, foto de perfil, tabela de preços em PDF ou imagem |
-| Plano Premium (Stripe) | Assinatura | Plano Pro: alertas e histórico completo |
-| Favoritos e "assistir depois" (limite 3 comum / ilimitado premium) | Itens acompanhados | Produtos que o produtor acompanha (Free até 3, Pro ilimitado) |
-| Extras (Swagger, CI/CD, observabilidade) | Continuam valendo | *Listar aqui as que foram feitas* |
+| Catálogo de filmes (TMDB) | Recurso principal do negócio | **Cotações**: produto, praça (cooperativa ou cerealista), preço, unidade e data |
+| Microsserviço de login + RBAC | Papéis do negócio | `produtor` (padrão), `operador` (publica preços da própria praça) e `admin` |
+| Logs e auditoria (`log_service`, Redis Streams) | Eventos de negócio | `cotacao_publicada`, `cotacao_atualizada`, `cotacao_removida`, `praca_criada`, `produto_acompanhado`, além de login e acesso negado |
+| Upload e perfil (MinIO) | Arquivos do domínio | **Tabela de preços** (PDF ou imagem) anexada à cotação, além da foto de perfil |
+| Plano Premium (Stripe) | Assinatura | Plano Pro (alertas e histórico). A integração com Stripe foi mantida e será adaptada na atividade 11 |
+| Favoritos e "assistir depois" (limite de 3 no plano comum) | Itens acompanhados | **Produtos acompanhados**: Free até 3, Pro ilimitado |
 
-## Próximas entregas
+## Arquitetura
 
-O roteiro está nas issues deste repositório (modelagem das tabelas, papéis, CRUD de cotações, comparação de preços, plano Pro no Stripe, alertas e landing page). A troca da stack para este repositório acontece na atividade 10 e a assinatura com Stripe na atividade 11. Infraestrutura e domínio continuam os mesmos.
+O sistema roda como uma única stack no Portainer, no mesmo subdomínio de sempre. O banco MariaDB é externo à stack.
+
+```mermaid
+flowchart LR
+    U["Navegador<br/>pedro-ferreira-isw055.lapps.studio"] -->|HTTPS| W
+
+    subgraph STACK["Stack no Portainer (mesma VM e mesmo subdomínio)"]
+        W["catalogo_web<br/>Flask: telas e regras do negócio<br/>porta 8225 para 5000"]
+        A["auth_api<br/>Flask: login, cadastro e papéis<br/>porta interna 5001"]
+        L["log_service<br/>Flask: eventos de negócio<br/>porta interna 5002"]
+        R[("Redis<br/>Stream auditoria")]
+        M[("MinIO<br/>bucket perfis<br/>porta interna 9000")]
+    end
+
+    DB[("MariaDB<br/>externo, fornecido pelo professor")]
+    S["Stripe<br/>checkout e webhook"]
+    E["SMTP<br/>recuperação de senha"]
+
+    W -->|"HTTP: login, cadastro, papéis"| A
+    W -->|"HTTP: registra eventos"| L
+    L --> R
+    W -->|"anexos e fotos"| M
+    W -->|"cotações, praças, produtos, acompanhados"| DB
+    A -->|"usuários e tokens de senha"| DB
+    A --> E
+    W -->|"assinatura Pro"| S
+```
+
+| De | Para | Para quê |
+|---|---|---|
+| Navegador | `catalogo_web` | Todas as telas e rotas do sistema |
+| `catalogo_web` | `auth_api` | Cadastro, login, listagem de usuários, troca de papel e exclusão |
+| `catalogo_web` | `log_service` | Registro de eventos de negócio (envio assíncrono, não bloqueia a tela) |
+| `log_service` | Redis | Grava os eventos no stream `auditoria`; o admin consulta em `/admin/logs` |
+| `catalogo_web` | MinIO | Upload e leitura da tabela de preços das cotações e da foto de perfil |
+| `catalogo_web` e `auth_api` | MariaDB | Tabelas do domínio e de usuários |
+| `catalogo_web` | Stripe | Checkout do plano Pro (atividade 11 conclui a adaptação) |
+
+Serviços em `docker-compose.yml`: `catalogo_web`, `auth_api`, `log_service`, `redis` e `minio`. Só o `catalogo_web` publica porta (`8225:5000`); os demais ficam acessíveis apenas dentro da rede da stack.
+
+## Banco de dados
+
+O script [`db/001_dominio.sql`](db/001_dominio.sql) faz a migração e o seed. Quem clonar o repositório recria o domínio rodando esse arquivo no banco, e ele pode ser executado mais de uma vez sem duplicar dados.
+
+| Tabela | Conteúdo | Relações |
+|---|---|---|
+| `produtos` | Soja, milho, trigo, ureia, adubo NPK | |
+| `pracas` | Cooperativas e cerealistas | `usuario_id` aponta para o operador dono |
+| `cotacoes` | Preço, unidade, observação, anexo e data de atualização | `produto_id`, `praca_id` e `usuario_id` |
+| `acompanhados` | Produtos que cada usuário acompanha | `usuario_id` e `produto_id` (chave composta) |
+
+O script também troca o papel padrão de `usuarios` para `produtor`. As tabelas de usuários e de tokens de senha vêm do projeto anterior. O seed contém **dados de exemplo** (praças e preços fictícios), usados só para demonstração; as cotações reais são publicadas pelos operadores pela própria tela.
+
+
+## Papéis, permissões e isolamento
+
+| Papel | O que pode fazer |
+|---|---|
+| `produtor` (padrão no cadastro) | Consultar e comparar cotações, ver o detalhe, acompanhar produtos (até 3 no Free) |
+| `operador` | Tudo do produtor, mais cadastrar a própria praça e **publicar, editar e remover cotações apenas das suas praças** |
+| `admin` | Tudo do operador em qualquer praça, mais usuários e papéis, métricas e logs |
+
+**Isolamento:** a **leitura das cotações é pública** entre os usuários logados, porque o produtor precisa comparar os preços de todas as praças. O que é isolado por dono é a **escrita** (publicar, editar e remover) e os **produtos acompanhados**, que são privados de cada usuário. As permissões são conferidas no backend: ação de um papel sem permissão, ou sobre a cotação de outra praça, responde **403** mesmo quando a chamada é feita direto, sem passar pela tela, e a tentativa fica registrada no log como `acesso_negado`.
+
+## Eventos de negócio no log
+
+O admin consulta em `/admin/logs`, com quem fez e quando:
+
+`cotacao_publicada`, `cotacao_atualizada`, `cotacao_removida`, `praca_criada`, `produto_acompanhado`, `produto_desacompanhado`, `limite_atingido`, `acesso_negado`, `login` e `logout`.
+
+## Como rodar
+
+1. Crie o `.env` a partir do `.env.example` (banco, MinIO, e-mail e Stripe).
+2. Execute o `db/001_dominio.sql` no banco.
+3. Suba a stack: `docker compose up --build -d`.
+
+O banco só aceita conexões vindas da rede onde a stack roda no Portainer, então o deploy é feito por lá: **Stacks > Add stack > Repository**, com este repositório, a referência `refs/heads/main` e o caminho `docker-compose.yml`.
 
 ---
 
