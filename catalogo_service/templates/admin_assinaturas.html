@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Assinaturas | Admin | CotaAgro{% endblock %}
+
+{% block content %}
+<div class="admin-shell">
+    <p class="section-kicker">Painel Admin</p>
+    <h1 class="section-title-lg">Assinaturas</h1>
+    <p class="auth-subtitle">Valores em modo de teste do Stripe.</p>
+
+    <div class="metric-grid">
+        <div class="metric-card">
+            <span class="metric-number">{{ resumo.usuarios_free }}</span>
+            <span class="metric-label">Usuários no plano Free</span>
+        </div>
+        <div class="metric-card">
+            <span class="metric-number">{{ resumo.usuarios_pro }}</span>
+            <span class="metric-label">Usuários no plano Pro</span>
+        </div>
+        <div class="metric-card">
+            <span class="metric-number">{{ resumo.assinaturas_ativas }}</span>
+            <span class="metric-label">Assinaturas ativas</span>
+        </div>
+        <div class="metric-card">
+            <span class="metric-number">R$ {{ '%.2f'|format(resumo.mrr)|replace('.', ',') }}</span>
+            <span class="metric-label">MRR de teste</span>
+        </div>
+    </div>
+
+    <h4 class="comments-heading">Últimos eventos do Stripe processados</h4>
+    {% if eventos_stripe %}
+    <div class="table-wrap">
+        <table class="nf-table">
+            <thead><tr><th>Evento</th><th>Recebido em</th></tr></thead>
+            <tbody>
+                {% for ev in eventos_stripe %}
+                <tr><td>{{ ev.tipo }}</td><td>{{ ev.recebido_fmt }}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+        <div class="empty-box">Nenhum evento do Stripe recebido ainda.</div>
+    {% endif %}
+
+    <h4 class="comments-heading" style="margin-top:28px;">Últimos eventos do log</h4>
+    {% if eventos_log %}
+    <div class="table-wrap">
+        <table class="nf-table">
+            <thead><tr><th>Quando</th><th>Usuário</th><th>Ação</th><th>Detalhe</th></tr></thead>
+            <tbody>
+                {% for ev in eventos_log %}
+                <tr>
+                    <td>{{ ev.timestamp_fmt }}</td>
+                    <td>{{ ev.usuario_id }}</td>
+                    <td>{{ ev.acao }}</td>
+                    <td>{{ ev.detalhe }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+        <div class="empty-box">Nenhum evento no log.</div>
+    {% endif %}
+</div>
+{% endblock %}

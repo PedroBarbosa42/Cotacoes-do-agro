@@ -222,7 +222,9 @@ def login_required(f):
     return decorated
 
 def formatar_data(dt):
-    return dt.strftime('%d/%m/%Y %H:%M') if dt else ''
+    if not dt:
+        return ''
+    return dt.strftime('%d/%m/%Y %H:%M') if hasattr(dt, 'strftime') else str(dt)
 
 def parse_preco(texto):
     try:
@@ -605,8 +607,7 @@ def acompanhados_adicionar():
 
     if atingiu_limite('acompanhados', session['user_id']):
         registrar_evento(session['user_id'], 'limite_atingido', 'acompanhados')
-        flash(f'Limite de {LIMITE_GRATIS} produtos acompanhados do plano Free atingido. Assine o Pro para acompanhar sem limite.', 'danger')
-        return redirect(url_for('perfil'))
+        return render_template('limite.html', limite=LIMITE_GRATIS), 403
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -646,7 +647,7 @@ def perfil():
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT nome, email, bio, foto_key, premium FROM usuarios WHERE id = %s", (session['user_id'],))
+    cursor.execute("SELECT nome, email, bio, foto_key, premium, plano, status_assinatura, stripe_customer_id FROM usuarios WHERE id = %s", (session['user_id'],))
     usuario = cursor.fetchone()
 
     cursor.execute("""
@@ -765,107 +766,173 @@ def atualizar_foto():
     flash('Foto de perfil atualizada!', 'success')
     return redirect(url_for('perfil'))
 
-def ativar_premium_se_valido(cs, user_id):
-    if cs.get('client_reference_id') != str(user_id):
-        return False
-    if cs.get('mode') != 'subscription' or cs.get('payment_status') != 'paid':
-        return False
-    sub_id = cs.get('subscription')
-    if not sub_id:
-        return False
-    sub = stripe.Subscription.retrieve(sub_id)
-    if sub.get('status') not in ('active', 'trialing'):
-        return False
+STATUS_ATIVOS = ('active', 'trialing')
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE usuarios SET premium = TRUE, stripe_customer_id = %s, stripe_subscription_id = %s WHERE id = %s",
-        (cs.get('customer'), sub_id, user_id)
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
-    registrar_evento(user_id, 'premium_ativado', sub_id)
-    return True
+def buscar_usuario_stripe(cursor, customer_id=None, usuario_id=None):
+    """Acha o usuário dono do customer do Stripe (ou pelo id guardado nos metadados)."""
+    if customer_id:
+        cursor.execute("SELECT id, stripe_subscription_id FROM usuarios WHERE stripe_customer_id = %s", (customer_id,))
+        usuario = cursor.fetchone()
+        if usuario:
+            return usuario
+    if usuario_id and str(usuario_id).isdigit():
+        cursor.execute("SELECT id, stripe_subscription_id FROM usuarios WHERE id = %s", (int(usuario_id),))
+        return cursor.fetchone()
+    return None
+
+def valor_mensal_centavos(assinatura):
+    """Soma o valor mensal dos itens da assinatura (preço x quantidade)."""
+    total = 0
+    for item in (assinatura.get('items') or {}).get('data', []):
+        preco = item.get('price') or {}
+        total += int(preco.get('unit_amount') or 0) * int(item.get('quantity') or 1)
+    return total or None
+
+def aplicar_evento_stripe(cursor, tipo, obj):
+    """Atualiza o plano no banco. Retorna (usuario_id, acao, detalhe) para o log, ou None."""
+    if tipo == 'checkout.session.completed':
+        if obj.get('mode') != 'subscription' or obj.get('payment_status') not in ('paid', 'no_payment_required'):
+            return None
+        usuario = buscar_usuario_stripe(cursor, obj.get('customer'), obj.get('client_reference_id'))
+        if not usuario:
+            return None
+        cursor.execute("""
+            UPDATE usuarios
+            SET plano = 'pro', premium = TRUE, status_assinatura = 'active',
+                stripe_customer_id = %s, stripe_subscription_id = %s,
+                assinatura_valor_centavos = COALESCE(%s, assinatura_valor_centavos)
+            WHERE id = %s
+        """, (obj.get('customer'), obj.get('subscription'), obj.get('amount_total'), usuario['id']))
+        return usuario['id'], 'assinatura_ativada', obj.get('subscription') or ''
+
+    if tipo == 'customer.subscription.updated':
+        metadados = obj.get('metadata') or {}
+        usuario = buscar_usuario_stripe(cursor, obj.get('customer'), metadados.get('usuario_id'))
+        if not usuario:
+            return None
+        if usuario['stripe_subscription_id'] and usuario['stripe_subscription_id'] != obj.get('id'):
+            return None  # evento de uma assinatura antiga
+        status = obj.get('status')
+        ativo = status in STATUS_ATIVOS
+        cursor.execute("""
+            UPDATE usuarios
+            SET plano = %s, premium = %s, status_assinatura = %s,
+                stripe_customer_id = %s, stripe_subscription_id = %s, assinatura_valor_centavos = %s
+            WHERE id = %s
+        """, ('pro' if ativo else 'free', ativo, status, obj.get('customer'), obj.get('id'),
+              valor_mensal_centavos(obj) if ativo else None, usuario['id']))
+        return usuario['id'], 'assinatura_atualizada', f"{status}"
+
+    if tipo == 'customer.subscription.deleted':
+        usuario = buscar_usuario_stripe(cursor, obj.get('customer'), (obj.get('metadata') or {}).get('usuario_id'))
+        if not usuario:
+            return None
+        if usuario['stripe_subscription_id'] and usuario['stripe_subscription_id'] != obj.get('id'):
+            return None
+        cursor.execute("""
+            UPDATE usuarios
+            SET plano = 'free', premium = FALSE, status_assinatura = 'canceled',
+                stripe_subscription_id = NULL, assinatura_valor_centavos = NULL
+            WHERE id = %s
+        """, (usuario['id'],))
+        return usuario['id'], 'assinatura_cancelada', obj.get('id') or ''
+
+    if tipo == 'invoice.payment_failed':
+        usuario = buscar_usuario_stripe(cursor, obj.get('customer'))
+        if not usuario:
+            return None
+        cursor.execute("""
+            UPDATE usuarios
+            SET plano = 'free', premium = FALSE, status_assinatura = 'past_due',
+                assinatura_valor_centavos = NULL
+            WHERE id = %s
+        """, (usuario['id'],))
+        return usuario['id'], 'pagamento_falhou', obj.get('id') or ''
+
+    return None
 
 @app.route('/premium/assinar', methods=['POST'])
+@login_required
 def premium_assinar():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
+    user_id = session['user_id']
 
-    if usuario_eh_premium(session['user_id']):
-        flash('Você já é Pro.', 'success')
+    if usuario_eh_premium(user_id):
+        flash('Você já é Pro. Use "Gerenciar assinatura" para trocar de plano ou cancelar.', 'success')
         return redirect(url_for('perfil'))
 
-    if not (stripe.api_key or '').startswith('sk_test_'):
+    if not (stripe.api_key or '').startswith('sk_test_') or not STRIPE_PRICE_ID:
         flash(
             'O Stripe não está configurado em modo de teste. Configure STRIPE_SECRET_KEY '
-            'com uma chave sk_test_ e STRIPE_PRICE_ID com um preço criado no modo de teste '
-            'para usar o cartão 4242.',
+            '(sk_test_) e STRIPE_PRICE_ID (preço recorrente mensal criado no modo de teste).',
             'danger'
         )
         return redirect(url_for('perfil'))
 
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT email FROM usuarios WHERE id = %s", (session['user_id'],))
-    email = cursor.fetchone()[0]
-    cursor.close()
-    conn.close()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT email, stripe_customer_id FROM usuarios WHERE id = %s", (user_id,))
+    usuario = cursor.fetchone()
 
     try:
+        customer_id = usuario['stripe_customer_id']
+        if not customer_id:
+            cliente = stripe.Customer.create(email=usuario['email'], metadata={'usuario_id': str(user_id)})
+            customer_id = cliente.id
+            cursor.execute("UPDATE usuarios SET stripe_customer_id = %s WHERE id = %s", (customer_id, user_id))
+            conn.commit()
+
         checkout = stripe.checkout.Session.create(
             mode='subscription',
+            customer=customer_id,
             line_items=[{'price': STRIPE_PRICE_ID, 'quantity': 1}],
-            client_reference_id=str(session['user_id']),
-            customer_email=email,
+            client_reference_id=str(user_id),
+            subscription_data={'metadata': {'usuario_id': str(user_id)}},
             locale='pt-BR',
-            success_url=f'{BASE_URL}/premium/sucesso?session_id={{CHECKOUT_SESSION_ID}}',
+            success_url=f'{BASE_URL}/premium/sucesso',
             cancel_url=f'{BASE_URL}/perfil',
         )
     except stripe.StripeError as e:
         flash(f'Erro ao iniciar o checkout: {e}', 'danger')
         return redirect(url_for('perfil'))
+    finally:
+        cursor.close()
+        conn.close()
 
-    registrar_evento(session['user_id'], 'checkout_iniciado')
+    registrar_evento(user_id, 'checkout_iniciado')
     return redirect(checkout.url, code=303)
 
 @app.route('/premium/sucesso', methods=['GET'])
+@login_required
 def premium_sucesso():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
-
-    sid = request.args.get('session_id')
-    if sid:
-        try:
-            cs = stripe.checkout.Session.retrieve(sid)
-            if ativar_premium_se_valido(cs, session['user_id']):
-                flash('Pagamento confirmado! Você agora é Pro.', 'success')
-                return redirect(url_for('perfil'))
-        except stripe.StripeError:
-            pass
-
-    flash('Pagamento recebido. Se o plano Pro ainda não apareceu, clique em "Já paguei, atualizar status" no perfil.', 'success')
+    # O plano NÃO muda aqui: quem muda é o webhook do Stripe, validado no servidor.
+    flash('Pagamento recebido! Estamos aguardando a confirmação do Stripe; o plano Pro aparece assim que ela chegar (alguns segundos).', 'success')
     return redirect(url_for('perfil'))
 
-@app.route('/premium/sincronizar', methods=['POST'])
-def premium_sincronizar():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
+@app.route('/assinatura/portal', methods=['POST'])
+@login_required
+def assinatura_portal():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT stripe_customer_id FROM usuarios WHERE id = %s", (session['user_id'],))
+    usuario = cursor.fetchone()
+    cursor.close()
+    conn.close()
 
-    try:
-        sessoes = stripe.checkout.Session.list(limit=50)
-        for cs in sessoes.data:
-            if ativar_premium_se_valido(cs, session['user_id']):
-                flash('Plano Pro ativado! Pagamento confirmado no Stripe.', 'success')
-                return redirect(url_for('perfil'))
-    except stripe.StripeError as e:
-        flash(f'Não foi possível consultar o Stripe: {e}', 'danger')
+    if not usuario or not usuario['stripe_customer_id']:
+        flash('Você ainda não tem uma assinatura para gerenciar.', 'danger')
         return redirect(url_for('perfil'))
 
-    flash('Nenhum pagamento ativo encontrado para a sua conta.', 'danger')
-    return redirect(url_for('perfil'))
+    try:
+        portal = stripe.billing_portal.Session.create(
+            customer=usuario['stripe_customer_id'],
+            return_url=f'{BASE_URL}/perfil',
+        )
+    except stripe.StripeError as e:
+        flash(f'Não foi possível abrir o portal do cliente: {e}', 'danger')
+        return redirect(url_for('perfil'))
+
+    registrar_evento(session['user_id'], 'portal_aberto')
+    return redirect(portal.url, code=303)
 
 @app.route('/webhook/stripe', methods=['POST'])
 def webhook_stripe():
@@ -880,30 +947,39 @@ def webhook_stripe():
         return jsonify({"erro": "Assinatura inválida"}), 400
 
     evento = json.loads(payload)
+    event_id = evento.get('id')
     tipo = evento.get('type')
     obj = evento.get('data', {}).get('object', {})
 
-    if tipo == 'checkout.session.completed' and obj.get('payment_status') == 'paid':
-        usuario_id = obj.get('client_reference_id')
-        if usuario_id:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE usuarios SET premium = TRUE, stripe_customer_id = %s, stripe_subscription_id = %s WHERE id = %s",
-                (obj.get('customer'), obj.get('subscription'), int(usuario_id))
-            )
-            conn.commit()
-            cursor.close()
-            conn.close()
-            registrar_evento(int(usuario_id), 'premium_ativado', obj.get('subscription') or '')
+    if not event_id:
+        return jsonify({"erro": "Evento sem id"}), 400
 
-    elif tipo == 'customer.subscription.deleted':
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE usuarios SET premium = FALSE WHERE stripe_subscription_id = %s", (obj.get('id'),))
-        conn.commit()
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    resultado = None
+    try:
+        # Reivindica o evento: se o mesmo id chegar de novo, é ignorado (idempotência).
+        try:
+            cursor.execute("INSERT INTO stripe_eventos (event_id, tipo) VALUES (%s, %s)", (event_id, tipo))
+            conn.commit()
+        except mysql.connector.IntegrityError:
+            return jsonify({"recebido": True, "duplicado": True}), 200
+
+        try:
+            resultado = aplicar_evento_stripe(cursor, tipo, obj)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            cursor.execute("DELETE FROM stripe_eventos WHERE event_id = %s", (event_id,))
+            conn.commit()
+            print(f"Erro ao processar webhook {tipo}: {e}")
+            return jsonify({"erro": "Falha ao processar o evento"}), 500
+    finally:
         cursor.close()
         conn.close()
+
+    if resultado:
+        registrar_evento(resultado[0], resultado[1], resultado[2])
 
     return jsonify({"recebido": True}), 200
 
@@ -984,6 +1060,53 @@ def admin_metricas():
     }
 
     return render_template('admin_metricas.html', metricas=metricas)
+
+@app.route('/admin/assinaturas', methods=['GET'])
+@admin_required
+def admin_assinaturas():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("SELECT plano, COUNT(*) AS total FROM usuarios GROUP BY plano")
+    por_plano = {linha['plano']: linha['total'] for linha in cursor.fetchall()}
+
+    cursor.execute("""
+        SELECT COUNT(*) AS total, COALESCE(SUM(assinatura_valor_centavos), 0) AS centavos
+        FROM usuarios
+        WHERE status_assinatura IN ('active', 'trialing')
+    """)
+    ativas = cursor.fetchone()
+
+    cursor.execute("SELECT tipo, recebido_em FROM stripe_eventos ORDER BY recebido_em DESC, event_id DESC LIMIT 10")
+    eventos_stripe = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    for ev in eventos_stripe:
+        ev['recebido_fmt'] = formatar_data(ev['recebido_em'])
+
+    try:
+        resposta = requests.get('http://log_service:5002/eventos', params={'n': 10}, timeout=3)
+        eventos_log = resposta.json().get('eventos', [])
+    except requests.exceptions.RequestException:
+        eventos_log = []
+        flash('Não foi possível consultar o log-service.', 'danger')
+
+    for ev in eventos_log:
+        try:
+            ev['timestamp_fmt'] = datetime.fromtimestamp(float(ev['timestamp']), tz=BRASILIA_TZ).strftime('%d/%m/%Y %H:%M:%S')
+        except (KeyError, ValueError, TypeError):
+            ev['timestamp_fmt'] = ev.get('timestamp', '')
+
+    resumo = {
+        'usuarios_free': por_plano.get('free', 0),
+        'usuarios_pro': por_plano.get('pro', 0),
+        'assinaturas_ativas': ativas['total'],
+        'mrr': float(ativas['centavos']) / 100,
+    }
+
+    return render_template('admin_assinaturas.html', resumo=resumo,
+                           eventos_stripe=eventos_stripe, eventos_log=eventos_log)
 
 @app.route('/admin/logs', methods=['GET'])
 @admin_required

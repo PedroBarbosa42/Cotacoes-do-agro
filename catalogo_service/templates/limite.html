@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Limite do plano Free | CotaAgro{% endblock %}
+
+{% block content %}
+<div class="admin-shell">
+    <p class="section-kicker">Plano Free</p>
+    <h1 class="section-title-lg">Limite atingido</h1>
+    <p class="auth-subtitle">
+        O plano Free permite acompanhar até {{ limite }} produtos. Para acompanhar quantos quiser,
+        assine o plano Pro (R$ 19,90/mês) no seu perfil, ou pare de acompanhar um produto para liberar uma vaga.
+    </p>
+    <div class="row-actions" style="margin-top:22px;">
+        <a class="btn-pill btn-gold" href="{{ url_for('perfil') }}">Ver planos no perfil</a>
+        <a class="btn-pill btn-ghost" href="/acompanhados">Meus produtos acompanhados</a>
+    </div>
+</div>
+{% endblock %}

@@ -275,3 +275,6 @@ a:hover { color: var(--red); }
 @media (max-width: 720px) {
     .landing-hero, .landing-section, .landing-footer { padding-left: 20px; padding-right: 20px; }
 }
+
+/* Assinatura */
+.flash-inline { margin: 0 0 14px; padding: 12px 14px; background: rgba(227,168,43,0.14); border-left: 4px solid var(--gold); border-radius: 4px; color: var(--ink); font-size: .88rem; line-height: 1.5; }

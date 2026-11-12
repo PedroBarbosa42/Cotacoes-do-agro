@@ -20,13 +20,15 @@
     </div>
 
     <div class="plan-card {{ 'plan-card-premium' if usuario.premium else '' }}">
+        <h4 class="comments-heading">Seu plano</h4>
+        {% if usuario.status_assinatura == 'past_due' %}
+            <p class="flash-inline">⚠️ A cobrança da sua assinatura falhou, então o plano Pro foi suspenso. Atualize a forma de pagamento em "Gerenciar assinatura" para voltar ao Pro.</p>
+        {% endif %}
         {% if usuario.premium %}
-            <h4 class="comments-heading">Seu plano</h4>
             <p class="plan-title">⭐ Plano Pro ativo</p>
             <p class="profile-hint">Produtos acompanhados ilimitados, alertas de preço e histórico completo.</p>
             <a class="btn-pill btn-ghost btn-sm" href="/acompanhados">Ver produtos acompanhados</a>
         {% else %}
-            <h4 class="comments-heading">Seu plano</h4>
             <p class="plan-title">Plano Free</p>
             <p class="profile-hint">
                 Produtos acompanhados: {{ acompanhados|length }}/{{ limite }} &nbsp;•&nbsp; Histórico de 7 dias &nbsp;•&nbsp; Sem alertas
@@ -34,10 +36,12 @@
             <form action="{{ url_for('premium_assinar') }}" method="POST">
                 <button type="submit" class="btn-pill btn-gold btn-sm">⭐ Assinar Pro — R$ 19,90/mês</button>
             </form>
-            <form action="{{ url_for('premium_sincronizar') }}" method="POST">
-                <button type="submit" class="btn-pill btn-ghost btn-sm">Já paguei, atualizar status</button>
+            <p class="profile-hint">Pagamento em ambiente de teste (Stripe). Cartão de teste: 4242 4242 4242 4242, qualquer data futura e qualquer CVC.</p>
+        {% endif %}
+        {% if usuario.stripe_customer_id %}
+            <form action="{{ url_for('assinatura_portal') }}" method="POST">
+                <button type="submit" class="btn-pill btn-ghost btn-sm">Gerenciar assinatura</button>
             </form>
-            <p class="profile-hint">Pagamento em ambiente de teste (Stripe). Cartão de teste: 4242 4242 4242 4242.</p>
         {% endif %}
     </div>
 
