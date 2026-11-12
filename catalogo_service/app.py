@@ -873,15 +873,8 @@ def premium_assinar():
     cursor.execute("SELECT email, stripe_customer_id FROM usuarios WHERE id = %s", (user_id,))
     usuario = cursor.fetchone()
 
-    try:
-        customer_id = usuario['stripe_customer_id']
-        if not customer_id:
-            cliente = stripe.Customer.create(email=usuario['email'], metadata={'usuario_id': str(user_id)})
-            customer_id = cliente.id
-            cursor.execute("UPDATE usuarios SET stripe_customer_id = %s WHERE id = %s", (customer_id, user_id))
-            conn.commit()
-
-        checkout = stripe.checkout.Session.create(
+    def abrir_checkout(customer_id):
+        return stripe.checkout.Session.create(
             mode='subscription',
             customer=customer_id,
             line_items=[{'price': STRIPE_PRICE_ID, 'quantity': 1}],
@@ -891,6 +884,24 @@ def premium_assinar():
             success_url=f'{BASE_URL}/premium/sucesso',
             cancel_url=f'{BASE_URL}/perfil',
         )
+
+    try:
+        customer_id = usuario['stripe_customer_id']
+        checkout = None
+        if customer_id:
+            try:
+                checkout = abrir_checkout(customer_id)
+            except stripe.StripeError as e:
+                # Customer de outra conta/ambiente do Stripe (dado antigo): cria um novo.
+                if 'No such customer' not in str(e):
+                    raise
+                customer_id = None
+        if not customer_id:
+            cliente = stripe.Customer.create(email=usuario['email'], metadata={'usuario_id': str(user_id)})
+            customer_id = cliente.id
+            cursor.execute("UPDATE usuarios SET stripe_customer_id = %s WHERE id = %s", (customer_id, user_id))
+            conn.commit()
+            checkout = abrir_checkout(customer_id)
     except stripe.StripeError as e:
         flash(f'Erro ao iniciar o checkout: {e}', 'danger')
         return redirect(url_for('perfil'))
@@ -928,7 +939,16 @@ def assinatura_portal():
             return_url=f'{BASE_URL}/perfil',
         )
     except stripe.StripeError as e:
-        flash(f'Não foi possível abrir o portal do cliente: {e}', 'danger')
+        if 'No such customer' in str(e):
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE usuarios SET stripe_customer_id = NULL, stripe_subscription_id = NULL WHERE id = %s", (session['user_id'],))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            flash('Essa assinatura não existe mais no Stripe desta conta (dado antigo). O vínculo foi removido; assine o Pro de novo para gerenciar pelo portal.', 'danger')
+        else:
+            flash(f'Não foi possível abrir o portal do cliente: {e}', 'danger')
         return redirect(url_for('perfil'))
 
     registrar_evento(session['user_id'], 'portal_aberto')
