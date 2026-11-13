@@ -119,32 +119,8 @@ Assinatura é um **estado**, não um pagamento. Quem sabe o estado verdadeiro é
 
 O sistema roda como uma única stack no Portainer, no mesmo subdomínio de sempre. O banco MariaDB é externo à stack.
 
-```mermaid
-flowchart LR
-    U["Navegador<br/>pedro-ferreira-isw055.lapps.studio"] -->|HTTPS| W
+![alt text](Diagrama.png)
 
-    subgraph STACK["Stack no Portainer (mesma VM e mesmo subdomínio)"]
-        W["catalogo_web<br/>Flask: telas e regras do negócio<br/>porta 8225 para 5000"]
-        A["auth_api<br/>Flask: login, cadastro e papéis<br/>porta interna 5001"]
-        L["log_service<br/>Flask: eventos de negócio<br/>porta interna 5002"]
-        R[("Redis<br/>Stream auditoria")]
-        M[("MinIO<br/>bucket perfis<br/>porta interna 9000")]
-    end
-
-    DB[("MariaDB<br/>externo, fornecido pelo professor")]
-    S["Stripe<br/>checkout e webhook"]
-    E["SMTP<br/>recuperação de senha"]
-
-    W -->|"HTTP: login, cadastro, papéis"| A
-    W -->|"HTTP: registra eventos"| L
-    L --> R
-    W -->|"anexos e fotos"| M
-    W -->|"cotações, praças, produtos, acompanhados"| DB
-    A -->|"usuários e tokens de senha"| DB
-    A --> E
-    W -->|"checkout e portal do cliente"| S
-    S -->|"webhooks de assinatura"| W
-```
 
 | De | Para | Para quê |
 |---|---|---|
