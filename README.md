@@ -46,14 +46,36 @@ O preço **da sua praça**, comparado entre compradores e com alerta, em vez de 
 |---|---|---|
 | Cotações do dia | sim | sim |
 | Produtos acompanhados | até 3 | ilimitados |
-| Alertas de preço | não | sim |
-| Histórico de preços | 7 dias | completo |
+| Alertas de preço | não | planejado |
+| Histórico de preços | 7 dias | completo (planejado) |
 
-**O que o Free limita:** o número de produtos acompanhados (3), os alertas (não incluídos) e o histórico (7 dias).
+**O que o Free limita (já implementado):** o número de produtos acompanhados, no máximo 3. O limite é conferido no backend a cada requisição. Quem estoura recebe **403** com uma mensagem que diz qual é o limite e como liberar. Os alertas de preço e o histórico completo são benefícios **planejados** do Pro e ainda não foram implementados.
 
 **Por que alguém pagaria o Pro:** o alerta evita a rotina de ligar e conferir todo dia, e o histórico completo mostra o melhor momento de vender. Se o aviso ajuda a vender uma única saca por um preço melhor, o plano já se paga. O preço é uma hipótese inicial e será validado com os primeiros usuários.
 
-Cobrança recorrente via **Stripe** (modo de teste durante o desenvolvimento), sem guardar dados de cartão no sistema: apenas IDs de cliente e assinatura.
+Cobrança recorrente via **Stripe**, sempre em **modo de teste**, sem guardar dados de cartão no sistema: apenas os IDs de cliente e de assinatura.
+
+### Como a assinatura funciona
+
+Assinatura é um **estado**, não um pagamento. Quem sabe o estado verdadeiro é o Stripe, e o banco guarda uma cópia mantida em dia pelos **webhooks**.
+
+1. **Planos no Stripe:** produto **Pro** com preço recorrente mensal de R$ 19,90 e produto **Free** a R$ 0,00. O Free não passa pelo checkout.
+2. **Checkout:** o app cria o *customer* no Stripe, guarda o `stripe_customer_id` no usuário e abre uma Checkout Session com `mode=subscription`.
+3. **O plano nunca muda pelo redirect do checkout.** A tela de retorno só avisa que o pagamento foi recebido. Quem muda o plano no banco é sempre o webhook, validado pela assinatura do Stripe.
+4. **Webhooks** (`/webhook/stripe`), todos validados e sem efeito duplicado:
+
+| Evento | O que o app faz |
+|---|---|
+| `checkout.session.completed` | Guarda customer e subscription e muda o plano para Pro |
+| `customer.subscription.updated` | Atualiza plano, status e valor mensal (`active`, `past_due`, `canceled`...) |
+| `customer.subscription.deleted` | Volta o usuário para o Free |
+| `invoice.payment_failed` | Marca como inadimplente (`past_due`), tira o Pro e mostra um aviso no perfil |
+
+5. **Evento repetido não muda nada:** cada evento tem o seu `id` gravado na tabela `stripe_eventos`. Se o mesmo `id` chegar de novo, é ignorado. Se o processamento falha, o `id` é liberado e o Stripe reenvia.
+6. **Portal do cliente:** o botão "Gerenciar assinatura" abre o Billing Portal do Stripe (modo de teste), onde o cliente cancela sozinho. O portal está configurado com cancelamento imediato, e o `customer.subscription.deleted` devolve a conta ao Free.
+7. **Painel admin** em `/admin/assinaturas`: usuários por plano, assinaturas ativas, **MRR de teste** (soma do valor mensal das assinaturas ativas) e os últimos eventos do Stripe e do log.
+
+**Segredos:** a chave secreta, o segredo do webhook e o ID do preço ficam apenas nas variáveis de ambiente da stack no Portainer. O repositório contém só o `.env.example`, com os nomes (`STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` e `BASE_URL`).
 
 ## 7. Métricas de sucesso
 
@@ -90,7 +112,7 @@ Cobrança recorrente via **Stripe** (modo de teste durante o desenvolvimento), s
 | Microsserviço de login + RBAC | Papéis do negócio | `produtor` (padrão), `operador` (publica preços da própria praça) e `admin` |
 | Logs e auditoria (`log_service`, Redis Streams) | Eventos de negócio | `cotacao_publicada`, `cotacao_atualizada`, `cotacao_removida`, `praca_criada`, `produto_acompanhado`, além de login e acesso negado |
 | Upload e perfil (MinIO) | Arquivos do domínio | **Tabela de preços** (PDF ou imagem) anexada à cotação, além da foto de perfil |
-| Plano Premium (Stripe) | Assinatura | Plano Pro (alertas e histórico). A integração com Stripe foi mantida e será adaptada na atividade 11 |
+| Plano Premium (Stripe, cobrança única) | Assinatura recorrente | **Plano Pro** mensal: checkout de assinatura, webhooks, portal do cliente, limites por plano e painel de assinaturas |
 | Favoritos e "assistir depois" (limite de 3 no plano comum) | Itens acompanhados | **Produtos acompanhados**: Free até 3, Pro ilimitado |
 
 ## Arquitetura
@@ -120,7 +142,8 @@ flowchart LR
     W -->|"cotações, praças, produtos, acompanhados"| DB
     A -->|"usuários e tokens de senha"| DB
     A --> E
-    W -->|"assinatura Pro"| S
+    W -->|"checkout e portal do cliente"| S
+    S -->|"webhooks de assinatura"| W
 ```
 
 | De | Para | Para quê |
@@ -131,7 +154,7 @@ flowchart LR
 | `log_service` | Redis | Grava os eventos no stream `auditoria`; o admin consulta em `/admin/logs` |
 | `catalogo_web` | MinIO | Upload e leitura da tabela de preços das cotações e da foto de perfil |
 | `catalogo_web` e `auth_api` | MariaDB | Tabelas do domínio e de usuários |
-| `catalogo_web` | Stripe | Checkout do plano Pro (atividade 11 conclui a adaptação) |
+| `catalogo_web` e Stripe | Stripe | O app abre o checkout e o portal; o Stripe devolve os eventos no webhook `/webhook/stripe`, que mantém o plano no banco |
 
 Serviços em `docker-compose.yml`: `catalogo_web`, `auth_api`, `log_service`, `redis` e `minio`. Só o `catalogo_web` publica porta (`8225:5000`); os demais ficam acessíveis apenas dentro da rede da stack.
 
@@ -146,7 +169,14 @@ O script [`db/001_dominio.sql`](db/001_dominio.sql) faz a migração e o seed. Q
 | `cotacoes` | Preço, unidade, observação, anexo e data de atualização | `produto_id`, `praca_id` e `usuario_id` |
 | `acompanhados` | Produtos que cada usuário acompanha | `usuario_id` e `produto_id` (chave composta) |
 
-O script também troca o papel padrão de `usuarios` para `produtor`. As tabelas de usuários e de tokens de senha vêm do projeto anterior. O seed contém **dados de exemplo** (praças e preços fictícios), usados só para demonstração; as cotações reais são publicadas pelos operadores pela própria tela.
+O script [`db/003_assinatura.sql`](db/003_assinatura.sql) acrescenta o estado da assinatura:
+
+| Onde | Conteúdo |
+|---|---|
+| `usuarios` | `plano` (`free` ou `pro`), `status_assinatura`, `assinatura_valor_centavos`, `stripe_customer_id`, `stripe_subscription_id` e `premium` |
+| `stripe_eventos` | `event_id` (chave primária), `tipo` e `recebido_em`: eventos do Stripe já processados |
+
+O script `001` também troca o papel padrão de `usuarios` para `produtor`. As tabelas de usuários e de tokens de senha vêm do projeto anterior. O seed contém **dados de exemplo** (praças e preços fictícios), usados só para demonstração; as cotações reais são publicadas pelos operadores pela própria tela.
 
 
 ## Papéis, permissões e isolamento
@@ -155,7 +185,7 @@ O script também troca o papel padrão de `usuarios` para `produtor`. As tabelas
 |---|---|
 | `produtor` (padrão no cadastro) | Consultar e comparar cotações, ver o detalhe, acompanhar produtos (até 3 no Free) |
 | `operador` | Tudo do produtor, mais cadastrar a própria praça e **publicar, editar e remover cotações apenas das suas praças** |
-| `admin` | Tudo do operador em qualquer praça, mais usuários e papéis, métricas e logs |
+| `admin` | Tudo do operador em qualquer praça, mais usuários e papéis, métricas, logs e o painel de assinaturas |
 
 **Isolamento:** a **leitura das cotações é pública** entre os usuários logados, porque o produtor precisa comparar os preços de todas as praças. O que é isolado por dono é a **escrita** (publicar, editar e remover) e os **produtos acompanhados**, que são privados de cada usuário. As permissões são conferidas no backend: ação de um papel sem permissão, ou sobre a cotação de outra praça, responde **403** mesmo quando a chamada é feita direto, sem passar pela tela, e a tentativa fica registrada no log como `acesso_negado`.
 
@@ -163,13 +193,15 @@ O script também troca o papel padrão de `usuarios` para `produtor`. As tabelas
 
 O admin consulta em `/admin/logs`, com quem fez e quando:
 
-`cotacao_publicada`, `cotacao_atualizada`, `cotacao_removida`, `praca_criada`, `produto_acompanhado`, `produto_desacompanhado`, `limite_atingido`, `acesso_negado`, `login` e `logout`.
+`cotacao_publicada`, `cotacao_atualizada`, `cotacao_removida`, `praca_criada`, `produto_acompanhado`, `produto_desacompanhado`, `limite_atingido`, `acesso_negado`, `login`, `logout` e, da assinatura, `checkout_iniciado`, `assinatura_ativada`, `assinatura_atualizada`, `assinatura_cancelada`, `pagamento_falhou` e `portal_aberto`.
 
 ## Como rodar
 
 1. Crie o `.env` a partir do `.env.example` (banco, MinIO, e-mail e Stripe).
-2. Execute o `db/001_dominio.sql` no banco.
-3. Suba a stack: `docker compose up --build -d`.
+2. Execute no banco, nesta ordem, `db/001_dominio.sql` e `db/003_assinatura.sql`.
+3. No painel do Stripe, **em modo de teste**: crie o preço recorrente mensal do Pro, configure o portal do cliente (cancelamento imediato) e crie o webhook `https://pedro-ferreira-isw055.lapps.studio/webhook/stripe` com os 4 eventos da assinatura.
+4. Coloque `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` e `BASE_URL` nas variáveis da stack.
+5. Suba a stack: `docker compose up --build -d`.
 
 O banco só aceita conexões vindas da rede onde a stack roda no Portainer, então o deploy é feito por lá: **Stacks > Add stack > Repository**, com este repositório, a referência `refs/heads/main` e o caminho `docker-compose.yml`.
 
