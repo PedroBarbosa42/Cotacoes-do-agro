@@ -4,6 +4,10 @@ Projeto da disciplina do professor [@siriani](https://github.com/siriani). Evolu
 
 **Sistema no ar:** [https://pedro-ferreira-isw055.lapps.studio/](https://pedro-ferreira-isw055.lapps.studio/)
 
+## Relatório P2
+
+**Relatório consolidado (arquitetura e atividades 7 a 11):** [docs/P2_ISW055_Pedro_Ferreira.pdf](docs/P2_ISW055_Pedro_Ferreira.pdf)
+
 ---
 
 ## 1. Nome e frase
